@@ -1,0 +1,3 @@
+# Runtime dependencies, including the visible ManiSkill follower.
+# The dependency versions and Python compatibility bounds live in pyproject.toml.
+-e .[sim]

@@ -1,0 +1,17 @@
+[serial]
+device = "/dev/ttyACM0"
+baudrate = 1000000
+ids = [1, 2, 3, 4, 5, 6, 7]
+
+[leader]
+midpoint = 2047
+directions = [1, 1, 1, 1, 1, 1, 1]
+labels = ["base", "shoulder", "J3", "J4", "J5", "wrist", "trigger"]
+
+[xarm6]
+gripper_travel_degrees = 90.0
+gripper_command_max = 0.81
+
+[simulation]
+scene = "Empty-v1"
+rate = 30.0

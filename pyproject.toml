@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uarm-xarm6-teleop"
+version = "0.1.0"
+description = "Use a Feetech U-ARM as a leader for simulated and physical xArm6 followers."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "feetech-servo-sdk>=1.0.0,<2",
+    "numpy>=1.26,<3",
+    "pyserial>=3.5,<4",
+]
+
+[project.optional-dependencies]
+sim = [
+    "gymnasium>=0.29,<1.1",
+    "mani-skill>=3.0.0b21,<4",
+]
+dev = [
+    "pytest>=8,<9",
+    "ruff>=0.12,<1",
+]
+
+[project.scripts]
+uarm-monitor = "uarm_xarm6_teleop.cli.monitor:main"
+uarm-sim = "uarm_xarm6_teleop.cli.sim:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
