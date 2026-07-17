@@ -7,42 +7,43 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_IDS = (1, 2, 3, 4, 5, 6, 7)
-DEFAULT_LABELS = ("base", "shoulder", "J3", "J4", "J5", "wrist", "trigger")
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "uarm_xarm6.toml"
 
 
 @dataclass(frozen=True)
 class SerialConfig:
-    device: str = "/dev/ttyACM0"
-    baudrate: int = 1_000_000
-    ids: tuple[int, ...] = DEFAULT_IDS
+    device: str
+    baudrate: int
+    ids: tuple[int, ...]
 
 
 @dataclass(frozen=True)
 class LeaderConfig:
-    midpoint: int = 2047
-    directions: tuple[int, ...] = (1, 1, 1, 1, 1, 1, 1)
-    labels: tuple[str, ...] = DEFAULT_LABELS
+    midpoint: int
+    directions: tuple[int, ...]
+    labels: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class XArm6Config:
-    gripper_travel_degrees: float = 90.0
-    gripper_command_max: float = 0.81
+    reference_degrees: tuple[float, ...]
+    joint_directions: tuple[int, ...]
+    gripper_travel_degrees: float
+    gripper_command_max: float
 
 
 @dataclass(frozen=True)
 class SimulationConfig:
-    scene: str = "Empty-v1"
-    rate: float = 30.0
+    scene: str
+    rate: float
 
 
 @dataclass(frozen=True)
 class TeleopConfig:
-    serial: SerialConfig = SerialConfig()
-    leader: LeaderConfig = LeaderConfig()
-    xarm6: XArm6Config = XArm6Config()
-    simulation: SimulationConfig = SimulationConfig()
+    serial: SerialConfig
+    leader: LeaderConfig
+    xarm6: XArm6Config
+    simulation: SimulationConfig
 
 
 def _section(data: dict, name: str) -> dict:
@@ -66,6 +67,12 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
         raise ValueError("leader.midpoint must be between 0 and 4095")
     if config.serial.baudrate <= 0:
         raise ValueError("serial.baudrate must be positive")
+    if len(config.xarm6.reference_degrees) != 6:
+        raise ValueError("xarm6.reference_degrees must contain six values")
+    if len(config.xarm6.joint_directions) != 6:
+        raise ValueError("xarm6.joint_directions must contain six values")
+    if any(value not in (-1, 1) for value in config.xarm6.joint_directions):
+        raise ValueError("xarm6.joint_directions values must be either 1 or -1")
     if config.xarm6.gripper_travel_degrees <= 0:
         raise ValueError("xarm6.gripper_travel_degrees must be positive")
     if config.xarm6.gripper_command_max <= 0:
@@ -76,44 +83,45 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
 
 
 def load_config(path: str | Path | None = None) -> TeleopConfig:
-    """Load TOML configuration, or return validated built-in defaults."""
-    if path is None:
-        return validate_config(TeleopConfig())
+    """Load the project TOML configuration, optionally overlaid by another TOML."""
+    with DEFAULT_CONFIG_PATH.open("rb") as stream:
+        base_data = tomllib.load(stream)
 
-    config_path = Path(path).expanduser()
-    with config_path.open("rb") as stream:
-        data = tomllib.load(stream)
+    if path is None or Path(path).expanduser().resolve() == DEFAULT_CONFIG_PATH.resolve():
+        data = base_data
+    else:
+        config_path = Path(path).expanduser()
+        with config_path.open("rb") as stream:
+            override_data = tomllib.load(stream)
+        data = {}
+        for name in ("serial", "leader", "xarm6", "simulation"):
+            data[name] = {**_section(base_data, name), **_section(override_data, name)}
 
     serial = _section(data, "serial")
     leader = _section(data, "leader")
     xarm6 = _section(data, "xarm6")
     simulation = _section(data, "simulation")
 
-    defaults = TeleopConfig()
     config = TeleopConfig(
         serial=SerialConfig(
-            device=str(serial.get("device", defaults.serial.device)),
-            baudrate=int(serial.get("baudrate", defaults.serial.baudrate)),
-            ids=tuple(int(value) for value in serial.get("ids", defaults.serial.ids)),
+            device=str(serial["device"]),
+            baudrate=int(serial["baudrate"]),
+            ids=tuple(int(value) for value in serial["ids"]),
         ),
         leader=LeaderConfig(
-            midpoint=int(leader.get("midpoint", defaults.leader.midpoint)),
-            directions=tuple(
-                int(value) for value in leader.get("directions", defaults.leader.directions)
-            ),
-            labels=tuple(str(value) for value in leader.get("labels", defaults.leader.labels)),
+            midpoint=int(leader["midpoint"]),
+            directions=tuple(int(value) for value in leader["directions"]),
+            labels=tuple(str(value) for value in leader["labels"]),
         ),
         xarm6=XArm6Config(
-            gripper_travel_degrees=float(
-                xarm6.get("gripper_travel_degrees", defaults.xarm6.gripper_travel_degrees)
-            ),
-            gripper_command_max=float(
-                xarm6.get("gripper_command_max", defaults.xarm6.gripper_command_max)
-            ),
+            reference_degrees=tuple(float(value) for value in xarm6["reference_degrees"]),
+            joint_directions=tuple(int(value) for value in xarm6["joint_directions"]),
+            gripper_travel_degrees=float(xarm6["gripper_travel_degrees"]),
+            gripper_command_max=float(xarm6["gripper_command_max"]),
         ),
         simulation=SimulationConfig(
-            scene=str(simulation.get("scene", defaults.simulation.scene)),
-            rate=float(simulation.get("rate", defaults.simulation.rate)),
+            scene=str(simulation["scene"]),
+            rate=float(simulation["rate"]),
         ),
     )
     return validate_config(config)

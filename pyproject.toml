@@ -27,6 +27,7 @@ dev = [
 [project.scripts]
 uarm-monitor = "uarm_xarm6_teleop.cli.monitor:main"
 uarm-sim = "uarm_xarm6_teleop.cli.sim:main"
+uarm-tune-reference = "uarm_xarm6_teleop.cli.tune_reference:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

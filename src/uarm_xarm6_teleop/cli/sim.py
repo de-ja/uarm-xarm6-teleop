@@ -42,8 +42,10 @@ def run() -> None:
     rate = args.rate or config.simulation.rate
     scene = args.scene or config.simulation.scene
     mapping = XArm6Mapping(
-        config.xarm6.gripper_travel_degrees,
-        config.xarm6.gripper_command_max,
+        reference_degrees=config.xarm6.reference_degrees,
+        joint_directions=config.xarm6.joint_directions,
+        gripper_travel_degrees=config.xarm6.gripper_travel_degrees,
+        gripper_command_max=config.xarm6.gripper_command_max,
     )
 
     with FeetechLeader(config.serial, config.leader) as leader:

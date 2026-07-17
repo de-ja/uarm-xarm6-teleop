@@ -10,6 +10,8 @@ class ConfigTests(unittest.TestCase):
         config = load_config()
         self.assertEqual(config.serial.ids, (1, 2, 3, 4, 5, 6, 7))
         self.assertEqual(config.leader.midpoint, 2047)
+        self.assertEqual(len(config.xarm6.reference_degrees), 6)
+        self.assertEqual(len(config.xarm6.joint_directions), 6)
 
     def test_partial_config_uses_other_defaults(self):
         with tempfile.TemporaryDirectory() as directory:

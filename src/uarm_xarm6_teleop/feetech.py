@@ -14,15 +14,20 @@ try:
     from scservo_sdk import (
         COMM_SUCCESS,
         GroupSyncRead,
+        PacketHandler,
         PortHandler,
-        SMS_STS_PRESENT_POSITION_L,
-        SMS_STS_TORQUE_ENABLE,
-        sms_sts,
     )
 except ImportError as error:  # pragma: no cover - depends on the host environment
     raise ImportError(
         "The Feetech SDK is missing. Install this project with `pip install -e .`."
     ) from error
+
+
+# Feetech STS control-table addresses. The PyPI SDK provides the packet
+# protocol but, unlike Waveshare's vendor copy, does not expose model-specific
+# STS register constants.
+STS_TORQUE_ENABLE = 40
+STS_PRESENT_POSITION_L = 56
 
 
 class FeetechError(RuntimeError):
@@ -47,8 +52,10 @@ class FeetechLeader:
         self.serial_config = serial
         self.leader_config = leader
         self.port = PortHandler(serial.device)
-        self.packet = sms_sts(self.port)
-        self.sync_read = GroupSyncRead(self.packet, SMS_STS_PRESENT_POSITION_L, 2)
+        self.packet = PacketHandler(0)
+        self.sync_read = GroupSyncRead(
+            self.port, self.packet, STS_PRESENT_POSITION_L, 2
+        )
         self.torque_enabled_ids: tuple[int, ...] = ()
 
     def open(self) -> None:
@@ -67,12 +74,12 @@ class FeetechLeader:
         missing = []
         torque_enabled = []
         for servo_id in self.serial_config.ids:
-            _model, result, error = self.packet.ping(servo_id)
+            _model, result, error = self.packet.ping(self.port, servo_id)
             if result != COMM_SUCCESS or error != 0:
                 missing.append(servo_id)
                 continue
             torque, result, error = self.packet.read1ByteTxRx(
-                servo_id, SMS_STS_TORQUE_ENABLE
+                self.port, servo_id, STS_TORQUE_ENABLE
             )
             if result == COMM_SUCCESS and error == 0 and torque:
                 torque_enabled.append(servo_id)
@@ -96,13 +103,13 @@ class FeetechLeader:
 
         positions = []
         for servo_id in self.serial_config.ids:
-            available, error = self.sync_read.isAvailable(
-                servo_id, SMS_STS_PRESENT_POSITION_L, 2
+            available = self.sync_read.isAvailable(
+                servo_id, STS_PRESENT_POSITION_L, 2
             )
-            if not available or error != 0:
+            if not available:
                 raise FeetechError(f"No valid position received from servo ID {servo_id}")
             positions.append(
-                self.sync_read.getData(servo_id, SMS_STS_PRESENT_POSITION_L, 2)
+                self.sync_read.getData(servo_id, STS_PRESENT_POSITION_L, 2)
             )
         return tuple(positions)
 

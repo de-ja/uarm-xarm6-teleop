@@ -31,6 +31,8 @@ def positions_to_radians(
 class XArm6Mapping:
     """Map seven U-ARM values to six xArm6 joints and one gripper command."""
 
+    reference_degrees: tuple[float, ...]
+    joint_directions: tuple[int, ...]
     gripper_travel_degrees: float = 90.0
     gripper_command_max: float = 0.81
 
@@ -39,9 +41,9 @@ class XArm6Mapping:
             raise ValueError("leader_radians must contain exactly seven values")
 
         action = np.empty(7, dtype=np.float32)
-        # Original U-ARM mapping: J4/J5 swap, and follower J5 is reversed.
-        action[:6] = leader_radians[[0, 1, 2, 4, 3, 5]]
-        action[4] *= -1.0
+        reference = np.deg2rad(np.asarray(self.reference_degrees, dtype=float))
+        directions = np.asarray(self.joint_directions, dtype=float)
+        action[:6] = reference + leader_radians[:6] * directions
 
         travel = np.deg2rad(self.gripper_travel_degrees)
         ratio = np.clip(leader_radians[6] / travel, 0.0, 1.0)

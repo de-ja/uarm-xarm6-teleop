@@ -36,7 +36,7 @@ cd uarm-xarm6-teleop
 ### 2. Create the Python environment
 
 ```bash
-conda create -n uarm-teleop python=3.11
+conda create -n uarm-teleop --override-channels -c conda-forge python=3.11
 conda activate uarm-teleop
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
@@ -79,7 +79,17 @@ vulkaninfo --summary
 Resolve Vulkan errors before starting the graphical simulation. The read-only
 hardware check does not require Vulkan.
 
-### 5. Verify the U-ARM and simulator
+### 5. Download the xArm6 assets
+
+ManiSkill installs robot assets separately from its Python package. Download
+the xArm6 and Robotiq files once per computer:
+
+```bash
+python -m mani_skill.utils.download_asset xarm6 -y
+python -m mani_skill.utils.download_asset robotiq_2f -y
+```
+
+### 6. Verify the U-ARM and simulator
 
 With the U-ARM connected and supported in its calibrated CAD pose:
 
@@ -129,19 +139,37 @@ To verify the hardware path without initializing Vulkan or opening a window:
 uarm-sim --check-only
 ```
 
+## Tune the follower reference pose
+
+Open a simulation that does not step physics or connect to the U-ARM:
+
+```bash
+uarm-tune-reference
+```
+
+The xArm6 is selected automatically. In the **Articulation** window, drag the
+first six sliders (`joint1` through `joint6`) and ignore the gripper sliders
+and `+` buttons.
+Close the viewer when the pose matches the physical U-ARM. The command prints a
+`reference_degrees = [...]` line to copy into the `[xarm6]` section of the TOML
+configuration.
+
 ## Configuration
 
-Runtime defaults are in [`configs/uarm_xarm6.toml`](configs/uarm_xarm6.toml).
-Pass a modified configuration explicitly:
+Runtime configuration is in [`configs/uarm_xarm6.toml`](configs/uarm_xarm6.toml),
+and every command loads it automatically. To use a different configuration,
+pass it explicitly:
 
 ```bash
 uarm-sim --config configs/uarm_xarm6.toml
 ```
 
 If a leader joint has the opposite sign, change its corresponding entry in
-`leader.directions` from `1` to `-1`. The mapping from U-ARM J4/J5 to xArm6
-J5/J4 follows the original U-ARM simulation mapping and is isolated in
-`mapping.py`.
+`leader.directions` from `1` to `-1`. The `[xarm6]` configuration separately
+defines the follower's initial `reference_degrees` and `joint_directions`.
+The calibrated U-ARM CAD pose maps to the configured xArm6 reference pose.
+Joint-specific follower signs match the observed Feetech U-ARM orientation;
+subsequent U-ARM angles are applied as relative joint displacements.
 
 ## Safety boundary
 
