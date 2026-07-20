@@ -17,3 +17,21 @@ gripper_command_max = 0.81
 [simulation]
 scene = "Empty-v1"
 rate = 30.0
+
+[physical_xarm]
+# Leave blank in source control; pass --robot-ip or use a local override file.
+robot_ip = ""
+rate = 20.0
+mode = 6
+joint_speed_degrees = 20.0
+joint_acceleration_degrees = 100.0
+startup_tolerance_degrees = 5.0
+leader_start_tolerance_degrees = 10.0
+max_target_jump_degrees = 10.0
+watchdog_timeout = 0.25
+joint_lower_degrees = [-360.0, -118.0, -217.7, -360.0, -97.0, -360.0]
+joint_upper_degrees = [360.0, 120.0, 11.0, 360.0, 180.0, 360.0]
+gripper_open_position = 730
+gripper_closed_position = 50
+gripper_speed = 1000
+gripper_max_step = 40

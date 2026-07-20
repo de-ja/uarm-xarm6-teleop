@@ -12,6 +12,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.leader.midpoint, 2047)
         self.assertEqual(len(config.xarm6.reference_degrees), 6)
         self.assertEqual(len(config.xarm6.joint_directions), 6)
+        self.assertEqual(config.physical_xarm.mode, 6)
+        self.assertEqual(config.physical_xarm.rate, 20.0)
+        self.assertEqual(len(config.physical_xarm.joint_lower_degrees), 6)
 
     def test_partial_config_uses_other_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -26,6 +29,13 @@ class ConfigTests(unittest.TestCase):
             path = Path(directory) / "config.toml"
             path.write_text("[leader]\ndirections = [1, 1, 1, 0, 1, 1, 1]\n")
             with self.assertRaisesRegex(ValueError, "directions"):
+                load_config(path)
+
+    def test_non_servo_physical_mode_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text("[physical_xarm]\nmode = 0\n")
+            with self.assertRaisesRegex(ValueError, "mode must be 6"):
                 load_config(path)
 
 

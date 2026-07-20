@@ -1,9 +1,9 @@
 # U-ARM xArm6 Teleoperation
 
 A standalone Python teleoperation system that uses a Feetech-powered U-ARM as
-the leader for an xArm6 follower. The current backend displays and controls a
-visible xArm6 with a Robotiq gripper in ManiSkill. A physical xArm6 backend is
-planned.
+the leader for an xArm6 follower. It supports a visible xArm6 with a Robotiq
+gripper in ManiSkill and an experimental, guarded physical backend for an
+xArm6 with the standard xArm Gripper.
 
 The runtime servo path is read-only: it does not change IDs, calibration,
 EEPROM, torque state, or goal positions.
@@ -13,7 +13,7 @@ EEPROM, torque state, or goal positions.
 ```text
 Feetech U-ARM -> calibrated joint angles -> xArm6 mapping -> backend
                                                         |- ManiSkill
-                                                        `- physical xArm6 (planned)
+                                                        `- physical xArm6
 ```
 
 The leader is expected to have Feetech STS servos at IDs 1-7, ordered from the
@@ -47,6 +47,13 @@ For development and tests, also install the development tools:
 ```bash
 python -m pip install -e ".[dev]"
 python -m unittest discover -s tests -v
+```
+
+Install UFACTORY's maintained Python SDK only on a computer that will connect
+to the physical follower:
+
+```bash
+python -m pip install -e ".[physical]"
 ```
 
 ### 3. Configure serial-port access
@@ -171,8 +178,63 @@ The calibrated U-ARM CAD pose maps to the configured xArm6 reference pose.
 Joint-specific follower signs match the observed Feetech U-ARM orientation;
 subsequent U-ARM angles are applied as relative joint displacements.
 
+The `[physical_xarm]` section contains the physical control rate, conservative
+joint speed and acceleration, startup tolerances, target-jump threshold,
+watchdog timeout, joint bounds, and standard xArm Gripper positions. Keep
+`robot_ip` blank in committed configuration; pass it at runtime or put it in a
+private override TOML.
+
+## Physical xArm6 workflow
+
+The physical backend reconstructs the useful part of the original U-ARM
+[`servo2xarm.py`](https://github.com/MINT-SJTU/LeRobot-Anything-U-Arm/blob/main/src/uarm/scripts/Follower_Arm/xarm/servo2xarm.py): it streams joint targets at
+20 Hz in xArm mode 6 and commands the standard xArm Gripper. It deliberately
+does not copy the original script's hard-coded IP, automatic error handling,
+or automatic startup motion.
+
+First validate the complete mapping without connecting to the xArm. This reads
+the U-ARM and prints physical targets, but never imports or opens the xArm SDK:
+
+```bash
+uarm-real --once
+uarm-real
+```
+
+After the xArm IP is known and the computer is on the same network, inspect the
+follower. Inspection reads status, errors, joints, and gripper position; it does
+not enable motion:
+
+```bash
+uarm-real --robot-ip 192.168.1.XXX --inspect
+```
+
+Before enabling motion:
+
+1. Support the U-ARM in its calibrated CAD pose with leader torque disabled.
+2. In xArm Studio, place the physical xArm6 within 5 degrees per joint of the
+   target printed by `uarm-real --once`. The program will not move it into place.
+3. Resolve every controller error and warning in xArm Studio.
+4. Clear the workspace, keep the emergency stop in hand, and use a second person
+   as a spotter for the first test.
+5. Start at low configured speed and be ready to press the hardware emergency
+   stop.
+
+Then start physical teleoperation:
+
+```bash
+uarm-real --robot-ip 192.168.1.XXX --enable-motion
+```
+
+The program prints both poses and requires the exact robot IP to be typed before
+it enables mode 6. Ctrl-C, an SDK error or warning, a disconnected follower, an
+out-of-range target, a target jump over the configured threshold, or a command
+gap longer than 250 ms stops streaming and requests xArm state 4. Restart the
+program after any safety stop; it never clears controller faults automatically.
+
 ## Safety boundary
 
-ManiSkill controls only a simulated robot. A physical xArm6 will require a
-separate backend using the UFACTORY xArm SDK, together with joint limits,
-communication timeouts, rate limits, and an operator deadman control.
+ManiSkill controls only a simulated robot. The physical backend adds software
+guards, but they do not replace the xArm controller's limits, a cleared physical
+workspace, close supervision, or the hardware emergency stop. State 4 stops
+motion without deliberately releasing the arm's brakes or disabling motor
+power. Test without a payload and at low speed before increasing either.
