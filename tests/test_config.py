@@ -10,10 +10,15 @@ class ConfigTests(unittest.TestCase):
         config = load_config()
         self.assertEqual(config.serial.ids, (1, 2, 3, 4, 5, 6, 7))
         self.assertEqual(config.leader.midpoint, 2047)
+        self.assertEqual(config.leader.gripper_zero_position, 2457)
+        self.assertEqual(config.leader.gripper_pressed_position, 2757)
         self.assertEqual(len(config.xarm6.reference_degrees), 6)
         self.assertEqual(len(config.xarm6.joint_directions), 6)
+        self.assertEqual(config.xarm6.gripper_mode, "proportional")
+        self.assertAlmostEqual(config.xarm6.gripper_travel_degrees, 26.3671875)
         self.assertEqual(config.physical_xarm.mode, 6)
         self.assertEqual(config.physical_xarm.rate, 20.0)
+        self.assertEqual(config.physical_xarm.gripper_force, 20)
         self.assertEqual(len(config.physical_xarm.joint_lower_degrees), 6)
 
     def test_partial_config_uses_other_defaults(self):
@@ -36,6 +41,17 @@ class ConfigTests(unittest.TestCase):
             path = Path(directory) / "config.toml"
             path.write_text("[physical_xarm]\nmode = 0\n")
             with self.assertRaisesRegex(ValueError, "mode must be 6"):
+                load_config(path)
+
+    def test_invalid_toggle_hysteresis_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text(
+                "[xarm6]\n"
+                "gripper_press_degrees = 4\n"
+                "gripper_release_degrees = 4\n"
+            )
+            with self.assertRaisesRegex(ValueError, "must exceed"):
                 load_config(path)
 
 

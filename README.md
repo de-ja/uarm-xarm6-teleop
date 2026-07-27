@@ -3,7 +3,7 @@
 A standalone Python teleoperation system that uses a Feetech-powered U-ARM as
 the leader for an xArm6 follower. It supports a visible xArm6 with a Robotiq
 gripper in ManiSkill and an experimental, guarded physical backend for an
-xArm6 with the standard xArm Gripper.
+xArm6 with the xArm Gripper G2.
 
 The runtime servo path is read-only: it does not change IDs, calibration,
 EEPROM, torque state, or goal positions.
@@ -18,7 +18,9 @@ Feetech U-ARM -> calibrated joint angles -> xArm6 mapping -> backend
 
 The leader is expected to have Feetech STS servos at IDs 1-7, ordered from the
 base to the trigger. The CAD/rest pose must already be persistently calibrated
-to raw position 2047.
+to raw position 2047. Servo 7 uses its separately measured
+`leader.gripper_zero_position` as the open-trigger reference and
+`leader.gripper_pressed_position` as the fully closed reference.
 
 ## New computer setup
 
@@ -180,7 +182,7 @@ subsequent U-ARM angles are applied as relative joint displacements.
 
 The `[physical_xarm]` section contains the physical control rate, conservative
 joint speed and acceleration, startup tolerances, target-jump threshold,
-watchdog timeout, joint bounds, and standard xArm Gripper positions. Keep
+watchdog timeout, joint bounds, and xArm Gripper G2 limits. Keep
 `robot_ip` blank in committed configuration; pass it at runtime or put it in a
 private override TOML.
 
@@ -188,7 +190,7 @@ private override TOML.
 
 The physical backend reconstructs the useful part of the original U-ARM
 [`servo2xarm.py`](https://github.com/MINT-SJTU/LeRobot-Anything-U-Arm/blob/main/src/uarm/scripts/Follower_Arm/xarm/servo2xarm.py): it streams joint targets at
-20 Hz in xArm mode 6 and commands the standard xArm Gripper. It deliberately
+20 Hz in xArm mode 6 and commands the xArm Gripper G2. It deliberately
 does not copy the original script's hard-coded IP, automatic error handling,
 or automatic startup motion.
 
@@ -231,10 +233,29 @@ out-of-range target, a target jump over the configured threshold, or a command
 gap longer than 250 ms stops streaming and requests xArm state 4. Restart the
 program after any safety stop; it never clears controller faults automatically.
 
+### Proportional trigger mapping and G2 force limit
+
+Servo 7 currently uses proportional gripper motion. Its measured raw open
+position (`2457`) maps to a fully open G2, and its fully pressed position
+(`2757`) maps to a fully closed G2. The 300-count (`26.37 deg`) trigger stroke
+is clamped at both endpoints. Toggle mode and its hysteresis settings remain in
+the code and configuration but are inactive while `gripper_mode` is
+`"proportional"`.
+
+The G2 uses opening width in millimetres: `84` is open and `0` is closed. Every
+motion command includes `gripper_force = 20`, on the SDK's dimensionless
+`1-100` scale, and a speed of `50 mm/s`. This is a conservative starting limit,
+not a value in newtons. The G2 controller enforces the force setting directly.
+Additionally, a reported grasp state freezes the measured jaw position and
+blocks further closing until an opening toggle; any gripper error aborts the
+teleoperation run. Do not increase the force until low-risk grasp tests show it
+is necessary.
+
 ## Safety boundary
 
 ManiSkill controls only a simulated robot. The physical backend adds software
 guards, but they do not replace the xArm controller's limits, a cleared physical
 workspace, close supervision, or the hardware emergency stop. State 4 stops
 motion without deliberately releasing the arm's brakes or disabling motor
-power. Test without a payload and at low speed before increasing either.
+power. Test without a payload and at low speed and G2 force before increasing
+either.

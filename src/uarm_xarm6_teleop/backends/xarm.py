@@ -1,4 +1,4 @@
-"""Guarded UFACTORY xArm6 and standard xArm Gripper backend."""
+"""Guarded UFACTORY xArm6 and xArm Gripper G2 backend."""
 
 from __future__ import annotations
 
@@ -34,6 +34,9 @@ class XArmStatus:
     warning_code: int
     joint_degrees: tuple[float, ...]
     gripper_position: int
+    gripper_force: int
+    gripper_status: int | None
+    gripper_error_code: int
 
 
 class TargetSafety:
@@ -104,6 +107,7 @@ class XArm6Hardware:
         self._watchdog_tripped = False
         self._last_command_time = 0.0
         self._last_gripper_position: int | None = None
+        self._gripper_contact_latched = False
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: threading.Thread | None = None
 
@@ -132,8 +136,15 @@ class XArm6Hardware:
             if len(joints) < axis:
                 raise XArmHardwareError("The controller returned an incomplete joint sample")
             joints = joints[:axis]
-            code, gripper = self.arm.get_gripper_position()
-            self._check_code("get_gripper_position", code)
+            code, gripper = self.arm.get_gripper_g2_position()
+            self._check_code("get_gripper_g2_position", code)
+            code, gripper_force = self.arm.get_gripper_g2_force()
+            self._check_code("get_gripper_g2_force", code)
+            status_code, gripper_status = self.arm.get_gripper_status()
+            if status_code != 0:
+                gripper_status = None
+            code, gripper_error = self.arm.get_gripper_err_code()
+            self._check_code("get_gripper_err_code", code)
 
             return XArmStatus(
                 connected=True,
@@ -144,6 +155,11 @@ class XArm6Hardware:
                 warning_code=int(errors[1]),
                 joint_degrees=tuple(float(value) for value in np.rad2deg(joints)),
                 gripper_position=int(gripper),
+                gripper_force=int(gripper_force),
+                gripper_status=(
+                    None if gripper_status is None else int(gripper_status) & 0x03
+                ),
+                gripper_error_code=int(gripper_error),
             )
 
     def arm_motion(self, initial_target_radians: np.ndarray) -> XArmStatus:
@@ -154,6 +170,11 @@ class XArm6Hardware:
         if status.error_code or status.warning_code:
             raise XArmHardwareError(
                 f"Controller reports error={status.error_code}, warning={status.warning_code}; "
+                "resolve it in xArm Studio before teleoperation"
+            )
+        if status.gripper_error_code:
+            raise XArmHardwareError(
+                f"xArm Gripper reports error {status.gripper_error_code}; "
                 "resolve it in xArm Studio before teleoperation"
             )
 
@@ -178,10 +199,6 @@ class XArm6Hardware:
             self._check_code("motion_enable", self.arm.motion_enable(enable=True))
             self._check_code("set_mode", self.arm.set_mode(self.config.mode))
             self._check_code("set_state", self.arm.set_state(0))
-            self._check_code("set_gripper_mode", self.arm.set_gripper_mode(0))
-            self._check_code(
-                "set_gripper_enable", self.arm.set_gripper_enable(enable=True)
-            )
         except Exception:
             self._best_effort_stop()
             raise
@@ -191,6 +208,7 @@ class XArm6Hardware:
             self._watchdog_tripped = False
             self._last_command_time = time.monotonic()
             self._last_gripper_position = status.gripper_position
+            self._gripper_contact_latched = status.gripper_status == 2
         self._start_watchdog()
         return status
 
@@ -246,6 +264,33 @@ class XArm6Hardware:
             )
             gripper_position = self._last_gripper_position + gripper_delta
 
+            code, gripper_status = self.arm.get_gripper_status()
+            if code != 0:
+                gripper_status = None
+            code, gripper_error = self.arm.get_gripper_err_code()
+            self._check_code("get_gripper_err_code", code)
+            if gripper_error:
+                self._freeze_gripper()
+                raise XArmHardwareError(
+                    f"xArm Gripper reports error {gripper_error}; closing stopped"
+                )
+
+            opening = desired_gripper > self._last_gripper_position
+            send_gripper_target = gripper_position
+            if self._gripper_contact_latched:
+                if opening:
+                    self._gripper_contact_latched = False
+                else:
+                    send_gripper_target = self._last_gripper_position
+            elif (
+                gripper_status is not None
+                and int(gripper_status) & 0x03 == 2
+                and not opening
+            ):
+                self._freeze_gripper()
+                self._gripper_contact_latched = True
+                send_gripper_target = self._last_gripper_position
+
             self._check_code(
                 "set_servo_angle",
                 self.arm.set_servo_angle(
@@ -256,18 +301,41 @@ class XArm6Hardware:
                     wait=False,
                 ),
             )
-            if gripper_position != self._last_gripper_position:
+            if send_gripper_target != self._last_gripper_position:
                 self._check_code(
-                    "set_gripper_position",
-                    self.arm.set_gripper_position(
-                        gripper_position,
-                        wait=False,
+                    "set_gripper_g2_position",
+                    self.arm.set_gripper_g2_position(
+                        send_gripper_target,
                         speed=self.config.gripper_speed,
-                        auto_enable=False,
+                        force=self.config.gripper_force,
+                        wait=False,
                     ),
                 )
-                self._last_gripper_position = gripper_position
+                self._last_gripper_position = send_gripper_target
             self._last_command_time = time.monotonic()
+
+    @property
+    def gripper_contact_latched(self) -> bool:
+        with self._lock:
+            return self._gripper_contact_latched
+
+    def _freeze_gripper(self) -> None:
+        """Best-effort replacement of a closing target with measured position."""
+        code, position = self.arm.get_gripper_g2_position()
+        if code != 0 or position is None:
+            return
+        position = int(position)
+        try:
+            code = self.arm.set_gripper_g2_position(
+                position,
+                speed=self.config.gripper_speed,
+                force=self.config.gripper_force,
+                wait=False,
+            )
+        except Exception:
+            return
+        if code == 0:
+            self._last_gripper_position = position
 
     def _start_watchdog(self) -> None:
         self._watchdog_stop.clear()

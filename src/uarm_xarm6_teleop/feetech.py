@@ -120,6 +120,11 @@ class FeetechLeader:
             self.leader_config.midpoint,
             self.leader_config.directions,
         )
+        radians[6] = positions_to_radians(
+            [positions[6]],
+            self.leader_config.gripper_zero_position,
+            [self.leader_config.directions[6]],
+        )[0]
         return LeaderSample(time.monotonic(), positions, radians)
 
     def close(self) -> None:

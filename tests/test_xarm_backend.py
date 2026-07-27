@@ -20,7 +20,11 @@ class FakeArm:
         self.state = 0
         self.errors = [0, 0]
         self.joints = list(joints if joints is not None else np.zeros(6))
-        self.gripper = 730
+        self.gripper = 84
+        self.gripper_force = 0
+        self.gripper_status = 0
+        self.gripper_status_code = 0
+        self.gripper_error = 0
         self.calls = []
 
     def get_state(self):
@@ -32,8 +36,17 @@ class FakeArm:
     def get_servo_angle(self, is_radian=True):
         return 0, self.joints
 
-    def get_gripper_position(self):
+    def get_gripper_g2_position(self):
         return 0, self.gripper
+
+    def get_gripper_g2_force(self):
+        return 0, self.gripper_force
+
+    def get_gripper_status(self):
+        return self.gripper_status_code, self.gripper_status
+
+    def get_gripper_err_code(self):
+        return 0, self.gripper_error
 
     def is_joint_limit(self, joint, is_radian=True):
         return 0, False
@@ -65,9 +78,9 @@ class FakeArm:
         self.calls.append(("set_servo_angle", kwargs))
         return 0
 
-    def set_gripper_position(self, position, **kwargs):
+    def set_gripper_g2_position(self, position, **kwargs):
         self.gripper = position
-        self.calls.append(("set_gripper_position", position, kwargs))
+        self.calls.append(("set_gripper_g2_position", position, kwargs))
         return 0
 
     def disconnect(self):
@@ -121,7 +134,7 @@ class XArmBackendTests(unittest.TestCase):
         backend.close()
         self.assertFalse(any(call[0] == "motion_enable" for call in fake.calls))
 
-    def test_arm_and_command_use_mode_6_and_rate_limit_gripper(self):
+    def test_arm_and_command_use_mode_6_and_limit_g2_force(self):
         backend, fake = self.make_backend()
         backend.arm_motion(self.reference)
         action = np.concatenate([self.reference, [0.81]])
@@ -133,10 +146,56 @@ class XArmBackendTests(unittest.TestCase):
         self.assertFalse(servo_call[1]["wait"])
         self.assertTrue(servo_call[1]["is_radian"])
         gripper_call = next(
-            call for call in fake.calls if call[0] == "set_gripper_position"
+            call for call in fake.calls if call[0] == "set_gripper_g2_position"
         )
-        self.assertEqual(gripper_call[1], 690)
+        self.assertEqual(gripper_call[1], 82)
+        self.assertEqual(gripper_call[2]["speed"], 50)
+        self.assertEqual(gripper_call[2]["force"], 20)
         self.assertIn(("set_state", 4), fake.calls)
+
+    def test_g2_grasp_status_freezes_closing_until_open_command(self):
+        backend, fake = self.make_backend()
+        backend.arm_motion(self.reference)
+        closed = np.concatenate([self.reference, [0.81]])
+        opened = np.concatenate([self.reference, [0.0]])
+
+        backend.command(closed, gripper_command_max=0.81)
+        self.assertEqual(fake.gripper, 82)
+        fake.gripper = 60
+        fake.gripper_status = 2
+        backend.command(closed, gripper_command_max=0.81)
+        self.assertTrue(backend.gripper_contact_latched)
+        self.assertEqual(fake.gripper, 60)
+
+        gripper_calls = len(
+            [call for call in fake.calls if call[0] == "set_gripper_g2_position"]
+        )
+        fake.gripper_status = 0
+        backend.command(closed, gripper_command_max=0.81)
+        self.assertEqual(
+            len(
+                [
+                    call
+                    for call in fake.calls
+                    if call[0] == "set_gripper_g2_position"
+                ]
+            ),
+            gripper_calls,
+        )
+
+        backend.command(opened, gripper_command_max=0.81)
+        self.assertFalse(backend.gripper_contact_latched)
+        self.assertEqual(fake.gripper, 62)
+        backend.close()
+
+    def test_g2_error_stops_closing(self):
+        backend, fake = self.make_backend()
+        backend.arm_motion(self.reference)
+        fake.gripper_error = 11
+        closed = np.concatenate([self.reference, [0.81]])
+        with self.assertRaisesRegex(XArmHardwareError, "error 11"):
+            backend.command(closed, gripper_command_max=0.81)
+        backend.close()
 
 
 if __name__ == "__main__":

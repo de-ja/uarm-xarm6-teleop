@@ -49,6 +49,48 @@ class MappingTests(unittest.TestCase):
             atol=1e-5,
         )
 
+    def test_toggle_gripper_uses_hysteresis_and_one_toggle_per_pull(self):
+        mapping = XArm6Mapping(
+            reference_degrees=(0.0, -75.0, 10.0, 0.0, 60.0, 0.0),
+            joint_directions=(-1, -1, -1, -1, 1, -1),
+            gripper_mode="toggle",
+            gripper_press_degrees=10.0,
+            gripper_release_degrees=4.0,
+        )
+
+        def grip(trigger_degrees):
+            leader = np.zeros(7)
+            leader[6] = np.deg2rad(trigger_degrees)
+            return float(mapping.action(leader)[6])
+
+        self.assertEqual(grip(0), 0.0)
+        self.assertAlmostEqual(grip(11), 0.81)
+        self.assertAlmostEqual(grip(12), 0.81)
+        self.assertAlmostEqual(grip(6), 0.81)
+        self.assertAlmostEqual(grip(3), 0.81)
+        self.assertEqual(grip(11), 0.0)
+
+    def test_toggle_ignores_trigger_held_during_startup(self):
+        mapping = XArm6Mapping(
+            reference_degrees=(0.0, -75.0, 10.0, 0.0, 60.0, 0.0),
+            joint_directions=(-1, -1, -1, -1, 1, -1),
+            gripper_mode="toggle",
+        )
+        held = np.zeros(7)
+        held[6] = np.deg2rad(12.0)
+        self.assertEqual(float(mapping.action(held)[6]), 0.0)
+        mapping.action(np.zeros(7))
+        self.assertAlmostEqual(float(mapping.action(held)[6]), 0.81)
+
+    def test_toggle_can_preserve_intermediate_physical_start_position(self):
+        mapping = XArm6Mapping(
+            reference_degrees=(0.0, -75.0, 10.0, 0.0, 60.0, 0.0),
+            joint_directions=(-1, -1, -1, -1, 1, -1),
+            gripper_mode="toggle",
+        )
+        mapping.reset_gripper(0.0, closed=False, command=0.405)
+        self.assertAlmostEqual(float(mapping.action(np.zeros(7))[6]), 0.405)
+
 
 if __name__ == "__main__":
     unittest.main()

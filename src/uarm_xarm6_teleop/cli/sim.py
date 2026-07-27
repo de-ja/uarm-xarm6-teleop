@@ -46,6 +46,9 @@ def run() -> None:
         joint_directions=config.xarm6.joint_directions,
         gripper_travel_degrees=config.xarm6.gripper_travel_degrees,
         gripper_command_max=config.xarm6.gripper_command_max,
+        gripper_mode=config.xarm6.gripper_mode,
+        gripper_press_degrees=config.xarm6.gripper_press_degrees,
+        gripper_release_degrees=config.xarm6.gripper_release_degrees,
     )
 
     with FeetechLeader(config.serial, config.leader) as leader:

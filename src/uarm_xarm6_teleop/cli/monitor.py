@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
 def print_sample(config, sample, clear: bool) -> None:
     if clear:
         print("\033[2J\033[H", end="")
-    print("Feetech U-ARM (read-only; calibrated CAD pose = 0 deg)\n")
+    print("Feetech U-ARM (read-only; configured initial pose = 0 deg)\n")
     print(" ID  Joint         Raw     Angle")
     print(" --  ------------  ----  --------")
     for servo_id, label, position, degrees in zip(

@@ -20,6 +20,8 @@ class SerialConfig:
 @dataclass(frozen=True)
 class LeaderConfig:
     midpoint: int
+    gripper_zero_position: int
+    gripper_pressed_position: int
     directions: tuple[int, ...]
     labels: tuple[str, ...]
 
@@ -30,6 +32,9 @@ class XArm6Config:
     joint_directions: tuple[int, ...]
     gripper_travel_degrees: float
     gripper_command_max: float
+    gripper_mode: str
+    gripper_press_degrees: float
+    gripper_release_degrees: float
 
 
 @dataclass(frozen=True)
@@ -54,6 +59,7 @@ class PhysicalXArmConfig:
     gripper_open_position: int
     gripper_closed_position: int
     gripper_speed: int
+    gripper_force: int
     gripper_max_step: int
 
 
@@ -85,6 +91,10 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
         raise ValueError("leader.labels must contain seven values")
     if not 0 <= config.leader.midpoint < 4096:
         raise ValueError("leader.midpoint must be between 0 and 4095")
+    if not 0 <= config.leader.gripper_zero_position < 4096:
+        raise ValueError("leader.gripper_zero_position must be between 0 and 4095")
+    if not 0 <= config.leader.gripper_pressed_position < 4096:
+        raise ValueError("leader.gripper_pressed_position must be between 0 and 4095")
     if config.serial.baudrate <= 0:
         raise ValueError("serial.baudrate must be positive")
     if len(config.xarm6.reference_degrees) != 6:
@@ -97,6 +107,14 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
         raise ValueError("xarm6.gripper_travel_degrees must be positive")
     if config.xarm6.gripper_command_max <= 0:
         raise ValueError("xarm6.gripper_command_max must be positive")
+    if config.xarm6.gripper_mode not in ("proportional", "toggle"):
+        raise ValueError("xarm6.gripper_mode must be 'proportional' or 'toggle'")
+    if config.xarm6.gripper_release_degrees < 0:
+        raise ValueError("xarm6.gripper_release_degrees cannot be negative")
+    if config.xarm6.gripper_press_degrees <= config.xarm6.gripper_release_degrees:
+        raise ValueError(
+            "xarm6.gripper_press_degrees must exceed gripper_release_degrees"
+        )
     if config.simulation.rate <= 0:
         raise ValueError("simulation.rate must be positive")
     physical = config.physical_xarm
@@ -112,6 +130,7 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
         "max_target_jump_degrees": physical.max_target_jump_degrees,
         "watchdog_timeout": physical.watchdog_timeout,
         "gripper_speed": physical.gripper_speed,
+        "gripper_force": physical.gripper_force,
         "gripper_max_step": physical.gripper_max_step,
     }
     for name, value in positive_values.items():
@@ -126,10 +145,18 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
         )
     ):
         raise ValueError("physical_xarm lower joint limits must be below upper limits")
-    if not 0 <= physical.gripper_open_position <= 850:
-        raise ValueError("physical_xarm.gripper_open_position must be between 0 and 850")
-    if not 0 <= physical.gripper_closed_position <= 850:
-        raise ValueError("physical_xarm.gripper_closed_position must be between 0 and 850")
+    if not 0 <= physical.gripper_open_position <= 84:
+        raise ValueError("physical_xarm.gripper_open_position must be between 0 and 84")
+    if not 0 <= physical.gripper_closed_position <= 84:
+        raise ValueError("physical_xarm.gripper_closed_position must be between 0 and 84")
+    if physical.gripper_open_position <= physical.gripper_closed_position:
+        raise ValueError(
+            "physical_xarm.gripper_open_position must exceed gripper_closed_position"
+        )
+    if not 15 <= physical.gripper_speed <= 225:
+        raise ValueError("physical_xarm.gripper_speed must be between 15 and 225")
+    if not 1 <= physical.gripper_force <= 100:
+        raise ValueError("physical_xarm.gripper_force must be between 1 and 100")
     return config
 
 
@@ -162,6 +189,8 @@ def load_config(path: str | Path | None = None) -> TeleopConfig:
         ),
         leader=LeaderConfig(
             midpoint=int(leader["midpoint"]),
+            gripper_zero_position=int(leader["gripper_zero_position"]),
+            gripper_pressed_position=int(leader["gripper_pressed_position"]),
             directions=tuple(int(value) for value in leader["directions"]),
             labels=tuple(str(value) for value in leader["labels"]),
         ),
@@ -170,6 +199,9 @@ def load_config(path: str | Path | None = None) -> TeleopConfig:
             joint_directions=tuple(int(value) for value in xarm6["joint_directions"]),
             gripper_travel_degrees=float(xarm6["gripper_travel_degrees"]),
             gripper_command_max=float(xarm6["gripper_command_max"]),
+            gripper_mode=str(xarm6["gripper_mode"]),
+            gripper_press_degrees=float(xarm6["gripper_press_degrees"]),
+            gripper_release_degrees=float(xarm6["gripper_release_degrees"]),
         ),
         simulation=SimulationConfig(
             scene=str(simulation["scene"]),
@@ -202,6 +234,7 @@ def load_config(path: str | Path | None = None) -> TeleopConfig:
             gripper_open_position=int(physical_xarm["gripper_open_position"]),
             gripper_closed_position=int(physical_xarm["gripper_closed_position"]),
             gripper_speed=int(physical_xarm["gripper_speed"]),
+            gripper_force=int(physical_xarm["gripper_force"]),
             gripper_max_step=int(physical_xarm["gripper_max_step"]),
         ),
     )
