@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uarm-xarm6-teleop"
-version = "0.1.0"
+version = "0.2.0"
 description = "Use a Feetech U-ARM as a leader for simulated and physical xArm6 followers."
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
@@ -22,6 +22,10 @@ sim = [
 physical = [
     "xarm-python-sdk>=1.15,<2",
 ]
+web = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.34,<1",
+]
 dev = [
     "pytest>=8,<9",
     "ruff>=0.12,<1",
@@ -32,6 +36,10 @@ uarm-monitor = "uarm_xarm6_teleop.cli.monitor:main"
 uarm-real = "uarm_xarm6_teleop.cli.real:main"
 uarm-sim = "uarm_xarm6_teleop.cli.sim:main"
 uarm-tune-reference = "uarm_xarm6_teleop.cli.tune_reference:main"
+uarm-web = "uarm_xarm6_teleop.cli.web:main"
+
+[tool.setuptools.package-data]
+uarm_xarm6_teleop = ["web/dist/**/*"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

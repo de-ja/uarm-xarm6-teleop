@@ -11,6 +11,8 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+!src/uarm_xarm6_teleop/web/dist/
+!src/uarm_xarm6_teleop/web/dist/**
 downloads/
 eggs/
 .eggs/
@@ -205,6 +207,12 @@ tempCodeRunnerFile.py
 
 # Ruff stuff:
 .ruff_cache/
+
+# Node/Vite development output (the packaged web/dist bundle is committed).
+frontend/node_modules/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
 
 # PyPI configuration file
 .pypirc

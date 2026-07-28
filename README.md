@@ -58,6 +58,14 @@ to the physical follower:
 python -m pip install -e ".[physical]"
 ```
 
+Install the browser operator console on a computer that will run the web
+backend. Include `physical` as well when the console will command the xArm:
+
+```bash
+python -m pip install -e ".[web]"
+python -m pip install -e ".[web,physical]"  # physical follower host
+```
+
 ### 3. Configure serial-port access
 
 Add the current user to Ubuntu's serial-device group:
@@ -185,6 +193,65 @@ joint speed and acceleration, startup tolerances, target-jump threshold,
 watchdog timeout, joint bounds, and xArm Gripper G2 limits. Keep
 `robot_ip` blank in committed configuration; pass it at runtime or put it in a
 private override TOML.
+
+## Web operator console
+
+The browser console wraps the guarded hardware backends in an explicit
+supervisory state machine. It supports leader connection, read-only robot
+inspection, dry-run mapping, guarded physical start, live joint and gripper
+telemetry, session events, and software stop.
+
+```bash
+uarm-web
+```
+
+The server binds to `127.0.0.1:8000` and opens the console in the default
+browser. To load a private configuration or suppress the browser launch:
+
+```bash
+uarm-web --config configs/local.toml --no-browser
+```
+
+The normal workflow is:
+
+1. Connect the leader. This is read-only; torque-enabled leader IDs are shown
+   as a warning.
+2. Enter the xArm controller IP and inspect it. Inspection cannot enable
+   motion.
+3. Start a dry run and confirm the displayed targets first.
+4. For physical motion, complete the safety dialog and type the exact inspected
+   robot IP. The backend repeats all leader, alignment, controller, joint-limit,
+   target-jump, gripper, and watchdog checks before entering mode 6.
+5. Use **Stop motion** or the hardware emergency stop. The UI control requests
+   xArm state 4 but is not an emergency stop.
+
+The last browser telemetry connection closing requests a software stop. A page
+reload or temporary browser/network failure may therefore stop a run, and a
+stopped physical session never resumes automatically.
+
+### Frontend development
+
+The production frontend is compiled into the Python package. During frontend
+development, run the API and Vite servers separately:
+
+```bash
+uarm-web --no-browser
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://127.0.0.1:5173`. Vite proxies `/api` and `/ws` to the FastAPI
+server on port 8000. Validate a frontend change with:
+
+```bash
+npm test
+npm run check
+npm run build
+```
+
+The backend architecture and reviewed upstream references are documented in
+[`docs/references.md`](docs/references.md).
 
 ## Physical xArm6 workflow
 
