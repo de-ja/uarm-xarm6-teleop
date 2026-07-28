@@ -10,8 +10,8 @@ import numpy as np
 
 from ..backends.xarm import TargetSafety, XArm6Hardware, XArmHardwareError, XArmStatus
 from ..config import validate_config
+from ..controller import make_mapping, require_safe_leader_start
 from ..feetech import FeetechError, FeetechLeader
-from ..mapping import XArm6Mapping
 from .common import add_connection_arguments, config_from_args
 
 
@@ -43,18 +43,6 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def make_mapping(config) -> XArm6Mapping:
-    return XArm6Mapping(
-        reference_degrees=config.xarm6.reference_degrees,
-        joint_directions=config.xarm6.joint_directions,
-        gripper_travel_degrees=config.xarm6.gripper_travel_degrees,
-        gripper_command_max=config.xarm6.gripper_command_max,
-        gripper_mode=config.xarm6.gripper_mode,
-        gripper_press_degrees=config.xarm6.gripper_press_degrees,
-        gripper_release_degrees=config.xarm6.gripper_release_degrees,
-    )
-
-
 def format_target(action: np.ndarray) -> str:
     joints = "  ".join(
         f"J{index}={degrees:+7.2f}"
@@ -79,17 +67,6 @@ def print_status(status: XArmStatus) -> None:
         f"{status.gripper_force}, state {gripper_state}, "
         f"error {status.gripper_error_code}"
     )
-
-
-def require_safe_leader_start(config, sample) -> None:
-    offsets = np.abs(sample.degrees[:6])
-    joint = int(np.argmax(offsets))
-    tolerance = config.physical_xarm.leader_start_tolerance_degrees
-    if offsets[joint] > tolerance:
-        raise XArmHardwareError(
-            f"Leader J{joint + 1} is {sample.degrees[joint]:+.2f} deg from its calibrated "
-            f"CAD pose; startup tolerance is {tolerance:.2f} deg"
-        )
 
 
 def run() -> None:
