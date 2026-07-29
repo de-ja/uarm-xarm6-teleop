@@ -230,6 +230,39 @@ curl http://192.168.1.100:8000/api/health
 curl http://192.168.1.100:8000/api/cameras
 ```
 
+#### Wi-Fi-only operator connection
+
+On a shared or public Wi-Fi network, never bind the unauthenticated console to
+`0.0.0.0` or the Wi-Fi address. Keep it on the follower's loopback interface
+and carry HTTP, WebSocket telemetry, and camera streams through an encrypted
+SSH tunnel instead.
+
+On the follower PC, confirm that SSH is active, start the console locally, and
+find the current Wi-Fi address:
+
+```bash
+systemctl is-active ssh
+uarm-web --config configs/local.toml --host 127.0.0.1 --port 8000 --no-browser
+ip -4 -brief address
+```
+
+Use SSH key authentication. On the operator PC, open the tunnel with the
+follower's username and current Wi-Fi address:
+
+```bash
+ssh -N \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=15 \
+  -L 127.0.0.1:8000:127.0.0.1:8000 \
+  FOLLOWER_USER@FOLLOWER_WIFI_IP
+```
+
+Keep that terminal open and browse to `http://127.0.0.1:8000` on the operator
+PC. Do not also start a local `uarm-web` process on the operator. If SSH cannot
+reach the follower, the Wi-Fi likely uses client isolation; use an
+institution-approved private hotspot, router, or VPN rather than exposing port
+8000 directly.
+
 ### 4. Verify and launch
 
 On the follower PC, perform the read-only checks first:
@@ -241,15 +274,17 @@ uarm-real --config configs/local.toml --once
 uarm-real --config configs/local.toml --robot-ip 192.168.1.XXX --inspect
 ```
 
-Then expose the packaged console to the trusted robot LAN:
+For a trusted, isolated robot LAN, bind the packaged console only to the
+follower's robot-network address:
 
 ```bash
-uarm-web --config configs/local.toml --host 0.0.0.0 --port 8000 --no-browser
+uarm-web --config configs/local.toml --host 192.168.1.100 --port 8000 --no-browser
 ```
 
-On the operator PC, open `http://192.168.1.100:8000`. Select one or more
-discovered cameras, connect the leader, inspect the xArm, and run a dry run.
-Start physical motion only after the displayed target matches the physical
+For shared Wi-Fi, use the loopback-bound SSH tunnel procedure above instead.
+On the operator PC, open the URL for the selected connection method. Select one
+or more discovered cameras, connect the leader, inspect the xArm, and run a dry
+run. Start physical motion only after the displayed target matches the physical
 xArm, all controller warnings are clear, the workspace is clear, and the
 hardware emergency stop is in hand.
 
