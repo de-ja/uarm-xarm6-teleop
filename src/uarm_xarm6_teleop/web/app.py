@@ -29,7 +29,7 @@ class RobotRequest(BaseModel):
 
 
 class StartRequest(BaseModel):
-    mode: Literal["dry_run", "physical"]
+    mode: Literal["dry_run", "simulation", "physical"]
     confirmation: str | None = None
 
 

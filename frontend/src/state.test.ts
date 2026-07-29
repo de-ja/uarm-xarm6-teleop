@@ -38,6 +38,7 @@ describe("operator capabilities", () => {
       snapshot({ state: "leader_ready", leader_connected: true }),
     );
     expect(leaderOnly.canStartDryRun).toBe(true);
+    expect(leaderOnly.canStartSimulation).toBe(true);
     expect(leaderOnly.canStartPhysical).toBe(false);
 
     const ready = getCapabilities(
@@ -51,11 +52,13 @@ describe("operator capabilities", () => {
       snapshot({ state: "fault", leader_connected: true, robot_connected: true }),
     );
     expect(faulted.canStartDryRun).toBe(false);
+    expect(faulted.canStartSimulation).toBe(false);
     expect(faulted.canStartPhysical).toBe(false);
 
     const running = getCapabilities(
       snapshot({ state: "running", leader_connected: true, robot_connected: true }),
     );
+    expect(running.canStartSimulation).toBe(false);
     expect(running.canStartPhysical).toBe(false);
     expect(running.canStop).toBe(true);
   });

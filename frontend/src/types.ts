@@ -38,7 +38,7 @@ export interface TeleopSnapshot {
   protocol_version: number;
   timestamp: number;
   state: TeleopState;
-  mode: "dry_run" | "physical" | null;
+  mode: "dry_run" | "simulation" | "physical" | null;
   leader_connected: boolean;
   robot_connected: boolean;
   robot_ip: string;

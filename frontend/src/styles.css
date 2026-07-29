@@ -63,6 +63,7 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var
 .robot-summary strong { font: 500 12px ui-monospace, "SFMono-Regular", Consolas, monospace; }
 .robot-summary span { color: var(--muted); font-size: 10px; margin-top: 4px; }
 .run-panel .danger-outline { margin-top: 8px; }
+.simulation-hint { margin: 7px 2px 2px; }
 
 .camera-title-actions { display: flex; align-items: center; gap: 10px; }
 .camera-title-actions > span { color: var(--muted); font: 11px ui-monospace, "SFMono-Regular", Consolas, monospace; }

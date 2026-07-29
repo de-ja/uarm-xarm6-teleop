@@ -12,6 +12,7 @@ from typing import Literal, Protocol, Self
 
 import numpy as np
 
+from .backends.maniskill import ManiSkillXArm6
 from .backends.xarm import TargetSafety, XArm6Hardware, XArmHardwareError, XArmStatus
 from .config import TeleopConfig, validate_config
 from .feetech import FeetechLeader, LeaderSample
@@ -33,7 +34,7 @@ class TeleopState(str, Enum):
     FAULT = "fault"
 
 
-TeleopMode = Literal["dry_run", "physical"]
+TeleopMode = Literal["dry_run", "simulation", "physical"]
 
 
 @dataclass(frozen=True)
@@ -92,8 +93,15 @@ class _Follower(Protocol):
     def close(self) -> None: ...
 
 
+class _Simulator(Protocol):
+    def step(self, action: np.ndarray) -> None: ...
+
+    def close(self) -> None: ...
+
+
 LeaderFactory = Callable[[object, object], _Leader]
 FollowerFactory = Callable[[object], _Follower]
+SimulationFactory = Callable[[str], _Simulator]
 
 
 def make_mapping(config: TeleopConfig) -> XArm6Mapping:
@@ -128,12 +136,14 @@ class TeleopController:
         *,
         leader_factory: LeaderFactory = FeetechLeader,
         follower_factory: FollowerFactory = XArm6Hardware,
+        simulation_factory: SimulationFactory = ManiSkillXArm6,
         monotonic: Callable[[], float] = time.monotonic,
         wall_time: Callable[[], float] = time.time,
     ):
         self.config = validate_config(config)
         self._leader_factory = leader_factory
         self._follower_factory = follower_factory
+        self._simulation_factory = simulation_factory
         self._monotonic = monotonic
         self._wall_time = wall_time
         self._lock = threading.RLock()
@@ -359,7 +369,7 @@ class TeleopController:
         *,
         confirmation: str | None = None,
     ) -> TeleopSnapshot:
-        if mode not in ("dry_run", "physical"):
+        if mode not in ("dry_run", "simulation", "physical"):
             raise TeleopControllerError(f"Unsupported teleoperation mode: {mode}")
         with self._operation_lock:
             with self._lock:
@@ -413,17 +423,26 @@ class TeleopController:
             self._worker.start()
         self._event(
             "warning" if mode == "physical" else "info",
-            "Starting physical motion." if mode == "physical" else "Starting dry run.",
+            {
+                "dry_run": "Starting dry run.",
+                "simulation": "Starting visible ManiSkill simulation.",
+                "physical": "Starting physical motion.",
+            }[mode],
         )
         return self.snapshot()
 
     def _run_loop(self) -> None:
         mode = self._mode
         assert mode is not None
+        simulator: _Simulator | None = None
         try:
             with self._lock:
                 follower = self._follower
                 action = None if self._action is None else self._action.copy()
+            if mode == "simulation":
+                simulator = self._simulation_factory(self.config.simulation.scene)
+                if self._stop_event.is_set():
+                    return
             if mode == "physical":
                 assert follower is not None and action is not None
                 status = follower.arm_motion(action[:6])
@@ -436,7 +455,10 @@ class TeleopController:
                 self._state = TeleopState.RUNNING
             self._event("info", f"Teleoperation is running in {mode.replace('_', ' ')} mode.")
 
-            period = 1.0 / self._physical_config.rate
+            rate = (
+                self.config.simulation.rate if mode == "simulation" else self._physical_config.rate
+            )
+            period = 1.0 / rate
             next_step = self._monotonic()
             next_status_poll = next_step
             rate_started = next_step
@@ -469,6 +491,9 @@ class TeleopController:
                     if contact_state and not last_contact_state:
                         self._event("warning", "G2 grasp detected; further closing is latched off.")
                     last_contact_state = contact_state
+                elif mode == "simulation":
+                    assert simulator is not None
+                    simulator.step(action)
 
                 now = self._monotonic()
                 rate_samples += 1
@@ -499,10 +524,25 @@ class TeleopController:
         finally:
             with self._lock:
                 follower = self._follower
-                faulted = self._state == TeleopState.FAULT
+            cleanup_errors = []
             if mode == "physical" and follower is not None:
-                follower.safe_stop()
+                try:
+                    follower.safe_stop()
+                except Exception as error:  # noqa: BLE001 - cleanup must continue
+                    cleanup_errors.append(f"physical stop failed: {error}")
+            if simulator is not None:
+                try:
+                    simulator.close()
+                except Exception as error:  # noqa: BLE001 - cleanup must continue
+                    cleanup_errors.append(f"simulation close failed: {error}")
+            if cleanup_errors:
+                cleanup_fault = "; ".join(cleanup_errors)
+                with self._lock:
+                    self._fault = cleanup_fault
+                    self._state = TeleopState.FAULT
+                self._event("error", cleanup_fault)
             with self._lock:
+                faulted = self._state == TeleopState.FAULT
                 if not faulted:
                     self._state = TeleopState.STOPPED
                 self._worker = None

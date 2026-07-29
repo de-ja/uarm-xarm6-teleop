@@ -12,6 +12,7 @@ export function getCapabilities(snapshot: TeleopSnapshot) {
     canConnectLeader: snapshot.state === "idle",
     canInspect: snapshot.leader_connected && !active && healthy,
     canStartDryRun: snapshot.leader_connected && !active && healthy,
+    canStartSimulation: snapshot.leader_connected && !active && healthy,
     canStartPhysical:
       snapshot.leader_connected && snapshot.robot_connected && !active && healthy,
     canStop: active,

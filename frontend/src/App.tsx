@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
+  Box,
   Cable,
   Camera,
   Check,
@@ -237,6 +238,7 @@ export function App() {
   const canConnectLeader = capabilities?.canConnectLeader ?? false;
   const canInspect = capabilities?.canInspect ?? false;
   const canStart = capabilities?.canStartDryRun ?? false;
+  const canStartSimulation = capabilities?.canStartSimulation ?? false;
   const canStartPhysical = capabilities?.canStartPhysical ?? false;
   const actualJoints = snapshot?.robot_status?.joint_degrees;
   const selectedCameras = cameras.filter((camera) => selectedCameraIds.includes(camera.id));
@@ -395,6 +397,16 @@ export function App() {
             >
               <Gauge size={16} /> Start dry run
             </button>
+            <button
+              className="button secondary full"
+              disabled={!canStartSimulation || busyAction !== null}
+              onClick={() => run("simulation", commands.startSimulation)}
+            >
+              <Box size={16} /> Start simulation
+            </button>
+            <p className="muted simulation-hint">
+              Opens the ManiSkill viewer on the computer running this backend.
+            </p>
             <button
               className="button danger-outline full"
               disabled={!canStartPhysical || busyAction !== null}

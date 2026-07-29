@@ -64,6 +64,7 @@ export const commands = {
   connectLeader: () => request("/api/leader/connect"),
   inspectRobot: (robotIp: string) => request("/api/robot/inspect", { robot_ip: robotIp }),
   startDryRun: () => request("/api/teleop/start", { mode: "dry_run" }),
+  startSimulation: () => request("/api/teleop/start", { mode: "simulation" }),
   startPhysical: (confirmation: string) =>
     request("/api/teleop/start", { mode: "physical", confirmation }),
   stop: () => request("/api/teleop/stop"),

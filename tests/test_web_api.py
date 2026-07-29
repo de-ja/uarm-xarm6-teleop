@@ -154,6 +154,7 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("already connected", raised.exception.detail)
 
     def test_invalid_mode_is_rejected_by_schema(self):
+        self.assertEqual(StartRequest.model_validate({"mode": "simulation"}).mode, "simulation")
         with self.assertRaises(ValidationError):
             StartRequest.model_validate({"mode": "unsafe"})
 

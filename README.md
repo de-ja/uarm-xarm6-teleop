@@ -63,6 +63,7 @@ backend. Include `physical` as well when the console will command the xArm:
 
 ```bash
 python -m pip install -e ".[web]"
+python -m pip install -e ".[web,sim]"       # visible ManiSkill follower
 python -m pip install -e ".[web,physical]"  # physical follower host
 ```
 
@@ -368,9 +369,9 @@ private override TOML.
 
 The browser console wraps the guarded hardware backends in an explicit
 supervisory state machine. It supports leader connection, read-only robot
-inspection, dry-run mapping, guarded physical start, live joint and gripper
-telemetry, dynamically discovered camera streams, session events, and software
-stop.
+inspection, dry-run mapping, visible ManiSkill simulation, guarded physical
+start, live joint and gripper telemetry, dynamically discovered camera streams,
+session events, and software stop.
 
 ```bash
 uarm-web
@@ -389,7 +390,9 @@ The normal workflow is:
    sampled continuously, and torque-enabled leader IDs are shown as a warning.
 2. Enter the xArm controller IP and inspect it. Inspection cannot enable
    motion.
-3. Start a dry run and confirm the displayed targets first.
+3. Start a dry run and confirm the displayed targets first. **Start
+   simulation** opens the configured ManiSkill scene on the computer running
+   `uarm-web` and drives only its visible xArm follower.
 4. For physical motion, complete the safety dialog and type the exact inspected
    robot IP. The backend repeats all leader, alignment, controller, joint-limit,
    target-jump, gripper, and watchdog checks before entering mode 6.

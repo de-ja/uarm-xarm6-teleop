@@ -96,11 +96,25 @@ class FakeFollower:
         self.closed = True
 
 
+class FakeSimulator:
+    def __init__(self, scene):
+        self.scene = scene
+        self.steps = []
+        self.closed = False
+
+    def step(self, action):
+        self.steps.append(action.copy())
+
+    def close(self):
+        self.closed = True
+
+
 class ControllerTests(unittest.TestCase):
     def setUp(self):
         self.config = load_config()
         self.leaders = []
         self.followers = []
+        self.simulators = []
 
     def make_controller(self, *, torque_ids=(), fail_event=None, step_radians=0.0):
         def leader_factory(serial, leader):
@@ -119,10 +133,16 @@ class ControllerTests(unittest.TestCase):
             self.followers.append(fake)
             return fake
 
+        def simulation_factory(scene):
+            fake = FakeSimulator(scene)
+            self.simulators.append(fake)
+            return fake
+
         return TeleopController(
             self.config,
             leader_factory=leader_factory,
             follower_factory=follower_factory,
+            simulation_factory=simulation_factory,
         )
 
     @staticmethod
@@ -182,6 +202,23 @@ class ControllerTests(unittest.TestCase):
         controller.disconnect()
         self.assertTrue(self.leaders[0].closed)
         self.assertEqual(controller.state, TeleopState.IDLE)
+
+    def test_simulation_steps_visible_follower_without_opening_robot(self):
+        controller = self.make_controller()
+        controller.connect_leader()
+
+        controller.start("simulation")
+        self.wait_for_state(controller, TeleopState.RUNNING)
+        self.wait_for(lambda: bool(self.simulators[0].steps), "a simulation step")
+        running = controller.snapshot()
+        controller.stop()
+
+        self.assertEqual(running.mode, "simulation")
+        self.assertEqual(self.simulators[0].scene, self.config.simulation.scene)
+        self.assertEqual(self.simulators[0].steps[0].shape, (7,))
+        self.assertTrue(self.simulators[0].closed)
+        self.assertEqual(self.followers, [])
+        controller.disconnect()
 
     def test_physical_start_requires_inspection_and_exact_ip_confirmation(self):
         controller = self.make_controller()
