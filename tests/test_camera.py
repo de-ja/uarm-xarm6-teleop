@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from uarm_xarm6_teleop.camera import (
+    AdaptiveJpegQuality,
     CameraCapability,
     CameraCatalog,
     CameraError,
@@ -54,6 +55,27 @@ class CameraCatalogTests(unittest.TestCase):
 
 
 class CameraManagerTests(unittest.TestCase):
+    def test_adaptive_quality_reduces_fast_and_recovers_cautiously(self):
+        quality = AdaptiveJpegQuality(
+            initial=80,
+            minimum=35,
+            maximum=85,
+            target_latency_ms=75,
+        )
+
+        self.assertEqual(quality.observe(160), 65)
+        self.assertEqual(quality.observe(100), 57)
+        for _ in range(3):
+            self.assertEqual(quality.observe(20), 57)
+        self.assertEqual(quality.observe(20), 60)
+
+    def test_adaptive_quality_validates_measurements_and_bounds(self):
+        quality = AdaptiveJpegQuality(initial=40, minimum=35, maximum=45)
+
+        self.assertEqual(quality.observe(1_000), 35)
+        with self.assertRaisesRegex(ValueError, "finite, non-negative"):
+            quality.observe(float("nan"))
+
     def test_subscribers_share_capture_and_last_close_releases_device(self):
         camera = CameraInfo("camera-a", "Workspace camera", "/dev/camera-a")
 
@@ -91,13 +113,19 @@ class CameraManagerTests(unittest.TestCase):
             catalog=StubCatalog(),
             capture_factory=open_capture,
             frame_encoder=lambda _frame, _quality: b"jpeg-frame",
+            wall_time=lambda: 123.456,
         )
         first = manager.subscribe(camera.id)
         second = manager.subscribe(camera.id)
         first_stream = first.iter_mjpeg()
         second_stream = second.iter_mjpeg()
 
-        self.assertIn(b"jpeg-frame", next(first_stream))
+        first_frame = next(first_stream)
+        self.assertIn(b"jpeg-frame", first_frame)
+        self.assertIn(b"X-Frame-Sequence:", first_frame)
+        self.assertIn(b"X-Capture-Timestamp: 123.456000", first_frame)
+        self.assertIn(b"X-JPEG-Quality: 80", first_frame)
+        self.assertEqual(manager.report_latency(camera.id, 100), 72)
         self.assertIn(b"jpeg-frame", next(second_stream))
         self.assertEqual(len(captures), 1)
 

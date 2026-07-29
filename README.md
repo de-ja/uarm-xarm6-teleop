@@ -372,13 +372,35 @@ cameras.
 
 Use the camera checkboxes in the console to start one or more feeds. Capture is
 opened only while a feed has browser subscribers, and multiple viewers of the
-same source share one capture worker. Browser video defaults to 1280x720 at 15
-FPS as a low-latency MJPEG stream on the same HTTP connection as the console.
+same source share one capture worker. Browser video uses 1280x720 at 15 FPS as
+a low-latency MJPEG stream on the same HTTP connection as the console. JPEG
+quality is automatic: each operator reports measured delivery latency once per
+second, and the follower reduces quality quickly above the 75 ms target while
+restoring it gradually on a healthy link. The active `AUTO Q...` value is shown
+beside each feed.
 
 A video failure marks that feed offline, but it does not act as an emergency
 stop. Loss of the final telemetry WebSocket still requests the existing
 software stop; the hardware emergency stop remains the authoritative safety
 control.
+
+### Latency measurements
+
+The Runtime panel reports **Leader to xArm** latency during physical
+teleoperation. It starts at the timestamp of a completed leader sample and ends
+when mapping, safety validation, xArm SDK checks, and asynchronous command
+submission have completed. It measures the local command path, not the xArm's
+mechanical settling time or tracking error.
+
+Each active camera reports capture-to-browser delivery latency beside its live
+state. Every MJPEG part carries the follower's frame-capture timestamp. The
+operator browser calibrates its clock offset against `/api/time`, then compares
+that timestamp with the time the exact JPEG arrives. This includes follower
+JPEG encoding and network delivery, but not the camera sensor's internal
+exposure/readout delay or the display panel's scan-out time. The browser
+recalibrates every 30 seconds to limit clock drift. The same measurement drives
+automatic JPEG quality between Q35 and Q85; the stream always skips to the
+newest captured frame rather than deliberately queueing stale frames.
 
 The last browser telemetry connection closing requests a software stop. A page
 reload or temporary browser/network failure may therefore stop a run, and a

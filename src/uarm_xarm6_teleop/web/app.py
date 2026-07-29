@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -30,6 +31,10 @@ class RobotRequest(BaseModel):
 class StartRequest(BaseModel):
     mode: Literal["dry_run", "physical"]
     confirmation: str | None = None
+
+
+class CameraLatencyRequest(BaseModel):
+    latency_ms: float = Field(ge=0, le=60_000)
 
 
 class TelemetryClients:
@@ -92,6 +97,10 @@ def create_app(
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/api/time")
+    def server_time() -> dict[str, float]:
+        return {"timestamp": time.time()}
+
     @app.get("/api/status")
     def status() -> dict[str, object]:
         return active_controller.snapshot().to_dict()
@@ -115,6 +124,14 @@ def create_app(
             media_type="multipart/x-mixed-replace; boundary=frame",
             headers={"Cache-Control": "no-store, max-age=0"},
         )
+
+    @app.post("/api/cameras/{camera_id}/latency")
+    def camera_latency(camera_id: str, request: CameraLatencyRequest) -> dict[str, object]:
+        try:
+            quality = active_cameras.report_latency(camera_id, request.latency_ms)
+        except (CameraError, ValueError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"mode": "auto", "jpeg_quality": quality}
 
     @app.post("/api/leader/connect")
     def connect_leader() -> dict[str, object]:

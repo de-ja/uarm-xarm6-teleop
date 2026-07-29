@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -16,7 +16,14 @@ import {
   Usb,
   VideoOff,
 } from "lucide-react";
-import { ApiError, cameraStreamUrl, commands, getCameras } from "./api";
+import {
+  ApiError,
+  calibrateServerClock,
+  commands,
+  getCameras,
+  reportCameraLatency,
+} from "./api";
+import { consumeCameraStream } from "./cameraStream";
 import { getCapabilities } from "./state";
 import type { CameraInfo, ControllerEvent, TeleopSnapshot } from "./types";
 import { useTelemetry } from "./useTelemetry";
@@ -68,17 +75,88 @@ function EventLog({ events }: { events: ControllerEvent[] }) {
   );
 }
 
-function CameraFeed({ camera }: { camera: CameraInfo }) {
+function CameraFeed({ camera, clockOffsetMs }: { camera: CameraInfo; clockOffsetMs: number | null }) {
   const [status, setStatus] = useState<"connecting" | "live" | "offline">("connecting");
+  const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const [jpegQuality, setJpegQuality] = useState<number | null>(null);
+  const imageRef = useRef<HTMLImageElement>(null);
+  const clockOffsetRef = useRef(clockOffsetMs);
+
+  useEffect(() => {
+    clockOffsetRef.current = clockOffsetMs;
+  }, [clockOffsetMs]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let currentUrl: string | null = null;
+    let live = false;
+    let lastLatencyUpdate = 0;
+    let lastLatencyReport = 0;
+    let lastJpegQuality: number | null = null;
+    setStatus("connecting");
+    setLatencyMs(null);
+    setJpegQuality(null);
+
+    void consumeCameraStream(camera.id, controller.signal, (frame) => {
+      const blob = new Blob([frame.jpeg.slice().buffer], { type: "image/jpeg" });
+      const nextUrl = URL.createObjectURL(blob);
+      if (imageRef.current !== null) imageRef.current.src = nextUrl;
+      if (currentUrl !== null) URL.revokeObjectURL(currentUrl);
+      currentUrl = nextUrl;
+      if (lastJpegQuality !== frame.jpegQuality) {
+        lastJpegQuality = frame.jpegQuality;
+        setJpegQuality(frame.jpegQuality);
+      }
+
+      if (!live) {
+        live = true;
+        setStatus("live");
+      }
+      const receivedAt = Date.now();
+      if (clockOffsetRef.current !== null) {
+        const measuredLatency = Math.max(
+          0,
+          receivedAt + clockOffsetRef.current - frame.capturedAtMs,
+        );
+        if (receivedAt - lastLatencyUpdate >= 200) {
+          setLatencyMs(measuredLatency);
+          lastLatencyUpdate = receivedAt;
+        }
+        if (receivedAt - lastLatencyReport >= 1000) {
+          lastLatencyReport = receivedAt;
+          void reportCameraLatency(camera.id, measuredLatency).catch(() => undefined);
+        }
+      }
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) {
+        setStatus("offline");
+        setLatencyMs(null);
+        console.error(error);
+      }
+    });
+
+    return () => {
+      controller.abort();
+      if (currentUrl !== null) URL.revokeObjectURL(currentUrl);
+    };
+  }, [camera.id]);
 
   return (
     <article className="camera-feed">
       <div className="camera-feed-heading">
-        <div>
+        <div className="camera-feed-label">
           <strong>{camera.name}</strong>
           <span>{camera.device}</span>
         </div>
-        <span className={`camera-feed-status ${status}`}>{status}</span>
+        <div className="camera-feed-telemetry">
+          <span className={`camera-feed-status ${status}`}>{status}</span>
+          <span className="camera-latency" title="Capture-to-browser delivery latency">
+            {latencyMs === null ? "—" : `${latencyMs.toFixed(0)} ms`}
+          </span>
+          <span className="camera-quality" title="Automatic JPEG stream quality">
+            {jpegQuality === null ? "AUTO" : `AUTO Q${jpegQuality}`}
+          </span>
+        </div>
       </div>
       <div className="camera-frame">
         {status !== "live" && (
@@ -87,12 +165,7 @@ function CameraFeed({ camera }: { camera: CameraInfo }) {
             <span>{status}</span>
           </div>
         )}
-        <img
-          src={cameraStreamUrl(camera.id)}
-          alt={`${camera.name} live view`}
-          onLoad={() => setStatus("live")}
-          onError={() => setStatus("offline")}
-        />
+        <img ref={imageRef} alt={`${camera.name} live view`} />
       </div>
     </article>
   );
@@ -157,6 +230,7 @@ export function App() {
   const [selectedCameraIds, setSelectedCameraIds] = useState<string[]>([]);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [camerasLoading, setCamerasLoading] = useState(true);
+  const [clockOffsetMs, setClockOffsetMs] = useState<number | null>(null);
 
   const capabilities = snapshot === null ? null : getCapabilities(snapshot);
   const active = capabilities?.active ?? false;
@@ -184,6 +258,21 @@ export function App() {
 
   useEffect(() => {
     void refreshCameras();
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    const calibrate = () => {
+      void calibrateServerClock()
+        .then((calibration) => !disposed && setClockOffsetMs(calibration.offsetMs))
+        .catch(() => !disposed && setClockOffsetMs(null));
+    };
+    calibrate();
+    const timer = window.setInterval(calibrate, 30_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
   }, []);
 
   const statusTone = useMemo(() => {
@@ -367,7 +456,9 @@ export function App() {
 
             {selectedCameras.length > 0 && (
               <div className="camera-grid">
-                {selectedCameras.map((camera) => <CameraFeed camera={camera} key={camera.id} />)}
+                {selectedCameras.map((camera) => (
+                  <CameraFeed camera={camera} clockOffsetMs={clockOffsetMs} key={camera.id} />
+                ))}
               </div>
             )}
           </section>
@@ -395,6 +486,11 @@ export function App() {
               <div className="section-title compact"><h2>Runtime</h2><Activity size={18} /></div>
               <Metric label="Control mode" value={snapshot.mode?.replace("_", " ") ?? "disabled"} />
               <Metric label="Loop rate" value={`${snapshot.loop_rate_hz.toFixed(1)} Hz`} good={!active || snapshot.loop_rate_hz > 15} />
+              <Metric
+                label="Leader to xArm"
+                value={snapshot.command_latency_ms === null ? "—" : `${snapshot.command_latency_ms.toFixed(1)} ms`}
+                good={snapshot.command_latency_ms === null || snapshot.command_latency_ms < 50}
+              />
               <Metric label="xArm mode / state" value={snapshot.robot_status ? `${snapshot.robot_status.mode} / ${snapshot.robot_status.state}` : "—"} />
               <Metric label="Error / warning" value={snapshot.robot_status ? `${snapshot.robot_status.error_code} / ${snapshot.robot_status.warning_code}` : "—"} good={!snapshot.robot_status || (!snapshot.robot_status.error_code && !snapshot.robot_status.warning_code)} />
             </section>

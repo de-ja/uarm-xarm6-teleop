@@ -31,8 +31,33 @@ export async function getCameras(): Promise<CameraInfo[]> {
   return response.json() as Promise<CameraInfo[]>;
 }
 
-export function cameraStreamUrl(cameraId: string) {
-  return `/api/cameras/${encodeURIComponent(cameraId)}/stream`;
+export async function reportCameraLatency(cameraId: string, latencyMs: number): Promise<void> {
+  await fetch(`/api/cameras/${encodeURIComponent(cameraId)}/latency`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ latency_ms: latencyMs }),
+  });
+}
+
+export interface ClockCalibration {
+  offsetMs: number;
+  roundTripMs: number;
+}
+
+export async function calibrateServerClock(samples = 3): Promise<ClockCalibration> {
+  let best: ClockCalibration | null = null;
+  for (let index = 0; index < samples; index += 1) {
+    const startedAt = Date.now();
+    const response = await fetch("/api/time", { cache: "no-store" });
+    const receivedAt = Date.now();
+    if (!response.ok) throw new ApiError("Could not calibrate follower clock", response.status);
+    const payload = (await response.json()) as { timestamp: number };
+    const roundTripMs = receivedAt - startedAt;
+    const offsetMs = payload.timestamp * 1000 - (startedAt + receivedAt) / 2;
+    if (best === null || roundTripMs < best.roundTripMs) best = { offsetMs, roundTripMs };
+  }
+  if (best === null) throw new ApiError("Could not calibrate follower clock", 503);
+  return best;
 }
 
 export const commands = {

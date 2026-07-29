@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import math
 import os
 import struct
 import threading
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -158,6 +160,58 @@ class VideoCapture(Protocol):
     def release(self) -> None: ...
 
 
+@dataclass(frozen=True)
+class CameraFrame:
+    jpeg: bytes
+    captured_at: float
+    jpeg_quality: int
+
+
+class AdaptiveJpegQuality:
+    """Favor delivery latency while cautiously recovering image quality."""
+
+    def __init__(
+        self,
+        initial: int = 80,
+        minimum: int = 35,
+        maximum: int = 85,
+        target_latency_ms: float = 75.0,
+    ):
+        if not 1 <= minimum <= initial <= maximum <= 100:
+            raise ValueError("JPEG quality must satisfy 1 <= minimum <= initial <= maximum <= 100")
+        if target_latency_ms <= 0:
+            raise ValueError("Target camera latency must be positive")
+        self._quality = initial
+        self.minimum = minimum
+        self.maximum = maximum
+        self.target_latency_ms = target_latency_ms
+        self._healthy_reports = 0
+        self._lock = threading.Lock()
+
+    @property
+    def quality(self) -> int:
+        with self._lock:
+            return self._quality
+
+    def observe(self, latency_ms: float) -> int:
+        if not math.isfinite(latency_ms) or latency_ms < 0:
+            raise ValueError("Camera latency must be a finite, non-negative value")
+
+        with self._lock:
+            if latency_ms > self.target_latency_ms:
+                reduction = 15 if latency_ms > self.target_latency_ms * 2 else 8
+                self._quality = max(self.minimum, self._quality - reduction)
+                self._healthy_reports = 0
+            elif latency_ms < self.target_latency_ms * 0.6:
+                self._healthy_reports += 1
+                if self._healthy_reports >= 4:
+                    self._quality = min(self.maximum, self._quality + 3)
+                    self._healthy_reports = 0
+            else:
+                self._healthy_reports = 0
+            return self._quality
+
+
 class _CameraSession:
     def __init__(
         self,
@@ -165,20 +219,22 @@ class _CameraSession:
         width: int,
         height: int,
         fps: int,
-        jpeg_quality: int,
+        quality: AdaptiveJpegQuality,
         capture_factory: Callable[[str], VideoCapture],
         frame_encoder: Callable[[object, int], bytes],
+        wall_time: Callable[[], float],
     ):
         self.camera = camera
         self.width = width
         self.height = height
         self.fps = fps
-        self.jpeg_quality = jpeg_quality
+        self.quality = quality
         self.capture_factory = capture_factory
         self.frame_encoder = frame_encoder
+        self.wall_time = wall_time
         self.condition = threading.Condition()
         self.stop_event = threading.Event()
-        self.frame: bytes | None = None
+        self.frame: CameraFrame | None = None
         self.sequence = 0
         self.error: str | None = None
         self.subscribers = 0
@@ -207,9 +263,11 @@ class _CameraSession:
                         raise CameraError(f"Video capture stopped for {self.camera.name}")
                     continue
                 failed_reads = 0
-                encoded = self.frame_encoder(raw_frame, self.jpeg_quality)
+                captured_at = self.wall_time()
+                jpeg_quality = self.quality.quality
+                encoded = self.frame_encoder(raw_frame, jpeg_quality)
                 with self.condition:
-                    self.frame = encoded
+                    self.frame = CameraFrame(encoded, captured_at, jpeg_quality)
                     self.sequence += 1
                     self.condition.notify_all()
         except (CameraError, OSError, RuntimeError, ValueError) as error:
@@ -231,7 +289,7 @@ class _CameraSession:
             if self.error is not None:
                 raise CameraError(self.error)
 
-    def wait_for_frame(self, sequence: int) -> tuple[int, bytes] | None:
+    def wait_for_frame(self, sequence: int) -> tuple[int, CameraFrame] | None:
         with self.condition:
             self.condition.wait_for(
                 lambda: self.sequence != sequence
@@ -269,8 +327,11 @@ class CameraSubscription:
                 sequence, frame = current
                 yield (
                     b"--frame\r\nContent-Type: image/jpeg\r\n"
-                    + f"Content-Length: {len(frame)}\r\n\r\n".encode()
-                    + frame
+                    + f"Content-Length: {len(frame.jpeg)}\r\n".encode()
+                    + f"X-Frame-Sequence: {sequence}\r\n".encode()
+                    + f"X-Capture-Timestamp: {frame.captured_at:.6f}\r\n".encode()
+                    + f"X-JPEG-Quality: {frame.jpeg_quality}\r\n\r\n".encode()
+                    + frame.jpeg
                     + b"\r\n"
                 )
         finally:
@@ -291,16 +352,24 @@ class CameraManager:
         height: int = 720,
         fps: int = 15,
         jpeg_quality: int = 80,
+        min_jpeg_quality: int = 35,
+        max_jpeg_quality: int = 85,
+        target_latency_ms: float = 75.0,
         capture_factory: Callable[[str], VideoCapture] | None = None,
         frame_encoder: Callable[[object, int], bytes] | None = None,
+        wall_time: Callable[[], float] = time.time,
     ):
         self.catalog = catalog or CameraCatalog()
         self.width = width
         self.height = height
         self.fps = fps
         self.jpeg_quality = jpeg_quality
+        self.min_jpeg_quality = min_jpeg_quality
+        self.max_jpeg_quality = max_jpeg_quality
+        self.target_latency_ms = target_latency_ms
         self.capture_factory = capture_factory or self._open_capture
         self.frame_encoder = frame_encoder or self._encode_frame
+        self.wall_time = wall_time
         self.lock = threading.Lock()
         self.sessions: dict[str, _CameraSession] = {}
 
@@ -335,14 +404,21 @@ class CameraManager:
             session = self.sessions.get(camera_id)
             if session is None:
                 camera = self.catalog.get(camera_id)
+                quality = AdaptiveJpegQuality(
+                    self.jpeg_quality,
+                    self.min_jpeg_quality,
+                    self.max_jpeg_quality,
+                    self.target_latency_ms,
+                )
                 session = _CameraSession(
                     camera,
                     self.width,
                     self.height,
                     self.fps,
-                    self.jpeg_quality,
+                    quality,
                     self.capture_factory,
                     self.frame_encoder,
+                    self.wall_time,
                 )
                 self.sessions[camera_id] = session
                 session.start()
@@ -354,6 +430,13 @@ class CameraManager:
             self._unsubscribe(session)
             raise
         return CameraSubscription(self, session)
+
+    def report_latency(self, camera_id: str, latency_ms: float) -> int:
+        with self.lock:
+            session = self.sessions.get(camera_id)
+        if session is None:
+            raise CameraError("Camera is not currently streaming")
+        return session.quality.observe(latency_ms)
 
     def _unsubscribe(self, session: _CameraSession) -> None:
         should_stop = False

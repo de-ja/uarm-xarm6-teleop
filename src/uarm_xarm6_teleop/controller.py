@@ -58,6 +58,7 @@ class TeleopSnapshot:
     gripper_command: float | None
     robot_status: dict[str, object] | None
     loop_rate_hz: float
+    command_latency_ms: float | None
     last_sample_age_ms: float | None
     fault: str | None
     events: tuple[ControllerEvent, ...]
@@ -153,6 +154,7 @@ class TeleopController:
         self._action: np.ndarray | None = None
         self._robot_status: XArmStatus | None = None
         self._loop_rate_hz = 0.0
+        self._command_latency_ms: float | None = None
         self._last_sample_received: float | None = None
         self._fault: str | None = None
         self._events: deque[ControllerEvent] = deque(maxlen=80)
@@ -400,6 +402,7 @@ class TeleopController:
             self._mode = mode
             self._fault = None
             self._loop_rate_hz = 0.0
+            self._command_latency_ms = None
             self._state = TeleopState.STARTING
             self._stop_event.clear()
             self._worker = threading.Thread(
@@ -456,6 +459,12 @@ class TeleopController:
                 if mode == "physical":
                     assert follower is not None
                     follower.command(action, self.config.xarm6.gripper_command_max)
+                    command_latency_ms = max(
+                        0.0,
+                        (self._monotonic() - sample.timestamp) * 1000.0,
+                    )
+                    with self._lock:
+                        self._command_latency_ms = command_latency_ms
                     contact_state = follower.gripper_contact_latched
                     if contact_state and not last_contact_state:
                         self._event("warning", "G2 grasp detected; further closing is latched off.")
@@ -546,6 +555,7 @@ class TeleopController:
                 self._robot_status = None
                 self._last_sample_received = None
                 self._loop_rate_hz = 0.0
+                self._command_latency_ms = None
                 self._fault = None
                 self._physical_config = self.config.physical_xarm
                 self._mapping = make_mapping(self.config)
@@ -580,7 +590,7 @@ class TeleopController:
             status = None if self._robot_status is None else asdict(self._robot_status)
             torque_ids = () if self._leader is None else self._leader.torque_enabled_ids
             return TeleopSnapshot(
-                protocol_version=1,
+                protocol_version=2,
                 timestamp=self._wall_time(),
                 state=self._state.value,
                 mode=self._mode,
@@ -593,6 +603,7 @@ class TeleopController:
                 gripper_command=gripper_command,
                 robot_status=status,
                 loop_rate_hz=self._loop_rate_hz,
+                command_latency_ms=self._command_latency_ms,
                 last_sample_age_ms=last_age,
                 fault=self._fault,
                 events=tuple(self._events),

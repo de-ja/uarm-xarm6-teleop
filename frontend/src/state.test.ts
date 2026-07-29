@@ -17,6 +17,7 @@ function snapshot(overrides: Partial<TeleopSnapshot>): TeleopSnapshot {
     gripper_command: null,
     robot_status: null,
     loop_rate_hz: 0,
+    command_latency_ms: null,
     last_sample_age_ms: null,
     fault: null,
     events: [],

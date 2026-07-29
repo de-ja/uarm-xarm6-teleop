@@ -48,6 +48,7 @@ export interface TeleopSnapshot {
   gripper_command: number | null;
   robot_status: RobotStatus | null;
   loop_rate_hz: number;
+  command_latency_ms: number | null;
   last_sample_age_ms: number | null;
   fault: string | null;
   events: ControllerEvent[];
