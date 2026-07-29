@@ -4,6 +4,7 @@ from pathlib import Path
 from fastapi import HTTPException
 from pydantic import ValidationError
 
+from uarm_xarm6_teleop.camera import CameraInfo, CameraManager
 from uarm_xarm6_teleop.config import load_config
 from uarm_xarm6_teleop.controller import (
     ControllerEvent,
@@ -78,12 +79,35 @@ class WebApiTests(unittest.TestCase):
     def test_api_routes_and_built_frontend_are_present(self):
         paths = {route.path for route in self.app.routes}
         self.assertIn("/api/status", paths)
+        self.assertIn("/api/cameras", paths)
+        self.assertIn("/api/cameras/{camera_id}/stream", paths)
         self.assertIn("/api/leader/connect", paths)
         self.assertIn("/api/teleop/start", paths)
         self.assertIn("/ws/telemetry", paths)
         self.assertIn("", paths)  # StaticFiles mount at the application root.
         frontend = Path(__file__).parents[1] / "src/uarm_xarm6_teleop/web/dist/index.html"
         self.assertIn("U-ARM Operator", frontend.read_text())
+
+    def test_camera_catalog_is_exposed_without_fixed_device_names(self):
+        camera = CameraInfo("camera-a", "Workspace camera", "/dev/v4l/by-id/camera-a")
+
+        class StubCatalog:
+            def list_cameras(self):
+                return (camera,)
+
+            def get(self, camera_id):
+                if camera_id != camera.id:
+                    raise AssertionError("unexpected camera ID")
+                return camera
+
+        manager = CameraManager(catalog=StubCatalog())
+        app = create_app(self.controller, camera_manager=manager)
+        route = next(route for route in app.routes if route.path == "/api/cameras")
+
+        self.assertEqual(
+            route.endpoint(),
+            [{"id": "camera-a", "name": "Workspace camera", "device": "/dev/v4l/by-id/camera-a"}],
+        )
 
     def test_controller_conflicts_are_returned_as_409(self):
         self.assertEqual(_invoke(self.controller.connect_leader)["state"], "leader_ready")

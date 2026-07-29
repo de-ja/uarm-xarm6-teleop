@@ -12,11 +12,12 @@ from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ..backends.xarm import XArmHardwareError
+from ..camera import CameraError, CameraManager
 from ..config import TeleopConfig, load_config
 from ..controller import TeleopController, TeleopControllerError, TeleopSnapshot
 from ..feetech import FeetechError
@@ -60,13 +61,16 @@ def create_app(
     controller: TeleopController | None = None,
     *,
     config: TeleopConfig | None = None,
+    camera_manager: CameraManager | None = None,
 ) -> FastAPI:
     active_controller = controller or TeleopController(config or load_config())
+    active_cameras = camera_manager or CameraManager()
     telemetry_clients = TelemetryClients(active_controller)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         yield
+        await asyncio.to_thread(active_cameras.close)
         await asyncio.to_thread(active_controller.close)
 
     app = FastAPI(
@@ -75,6 +79,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.teleop_controller = active_controller
+    app.state.camera_manager = active_cameras
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -94,6 +99,22 @@ def create_app(
     @app.get("/api/config")
     def get_config() -> dict[str, object]:
         return asdict(active_controller.config)
+
+    @app.get("/api/cameras")
+    def cameras() -> list[dict[str, str]]:
+        return [camera.to_dict() for camera in active_cameras.list_cameras()]
+
+    @app.get("/api/cameras/{camera_id}/stream")
+    def camera_stream(camera_id: str) -> StreamingResponse:
+        try:
+            subscription = active_cameras.subscribe(camera_id)
+        except CameraError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return StreamingResponse(
+            subscription.iter_mjpeg(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
 
     @app.post("/api/leader/connect")
     def connect_leader() -> dict[str, object]:

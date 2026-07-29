@@ -14,6 +14,12 @@ export interface ControllerEvent {
   message: string;
 }
 
+export interface CameraInfo {
+  id: string;
+  name: string;
+  device: string;
+}
+
 export interface RobotStatus {
   connected: boolean;
   version: string;

@@ -1,4 +1,4 @@
-import type { TeleopSnapshot } from "./types";
+import type { CameraInfo, TeleopSnapshot } from "./types";
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -23,6 +23,16 @@ export async function getStatus(): Promise<TeleopSnapshot> {
   const response = await fetch("/api/status");
   if (!response.ok) throw new ApiError("Could not reach the operator backend", response.status);
   return response.json() as Promise<TeleopSnapshot>;
+}
+
+export async function getCameras(): Promise<CameraInfo[]> {
+  const response = await fetch("/api/cameras");
+  if (!response.ok) throw new ApiError("Could not load camera sources", response.status);
+  return response.json() as Promise<CameraInfo[]>;
+}
+
+export function cameraStreamUrl(cameraId: string) {
+  return `/api/cameras/${encodeURIComponent(cameraId)}/stream`;
 }
 
 export const commands = {

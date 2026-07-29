@@ -24,6 +24,7 @@ physical = [
 ]
 web = [
     "fastapi>=0.115,<1",
+    "opencv-python>=4.10,<5.1",
     "uvicorn[standard]>=0.34,<1",
 ]
 dev = [

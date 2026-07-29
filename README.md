@@ -74,6 +74,13 @@ Add the current user to Ubuntu's serial-device group:
 sudo usermod -aG dialout "$USER"
 ```
 
+On a follower host with local cameras, also grant persistent video-device
+access so the web service does not depend on a desktop-session ACL:
+
+```bash
+sudo usermod -aG video "$USER"
+```
+
 Log out and back in for the group change to take effect. After connecting the
 Bus Servo Adapter, find its device name:
 
@@ -117,6 +124,134 @@ uarm-sim
 ```
 
 The final command should open a window containing the visible xArm6 follower.
+
+## Follower and operator PC deployment
+
+The operator PC runs only a modern browser. The follower PC owns every hardware
+connection and runs the Python backend:
+
+```text
+Operator browser
+  `- TCP 8000 (HTTP, WebSocket telemetry, MJPEG video)
+       `- follower PC
+            |- USB serial -> Feetech U-ARM
+            |- USB -> V4L2 cameras
+            `- Ethernet/xArm SDK -> xArm6 controller
+```
+
+The browser sends supervisory operations such as inspect, start, and stop. The
+20 Hz leader sampling, mapping, safety checks, and xArm commands remain local to
+the follower PC.
+
+### 1. Install the follower runtime
+
+On the follower PC, clone the repository and install only the physical and web
+extras. ManiSkill and Vulkan are not required for this deployment:
+
+```bash
+git clone https://github.com/de-ja/uarm-xarm6-teleop.git
+cd uarm-xarm6-teleop
+conda create -n uarm-teleop --override-channels -c conda-forge python=3.11
+conda activate uarm-teleop
+python -m pip install --upgrade pip
+python -m pip install -e ".[physical,web]"
+sudo usermod -aG dialout,video "$USER"
+```
+
+Log out and back in after changing groups. Confirm that the hardware is
+visible:
+
+```bash
+id -nG
+ls -l /dev/ttyACM* /dev/ttyUSB*
+ls -l /dev/v4l/by-id/* /dev/video*
+```
+
+For tests and frontend development, install the optional tools separately:
+
+```bash
+python -m pip install -e ".[physical,web,dev]"
+conda install --override-channels -c conda-forge nodejs=22
+cd frontend
+npm ci
+npm test
+npm run check
+npm run build
+cd ..
+pytest -q
+```
+
+The production frontend is already committed under
+`src/uarm_xarm6_teleop/web/dist`; Node.js is not required just to run it.
+
+### 2. Configure the follower
+
+Keep robot-specific values out of the committed configuration. Create a local
+override containing the actual serial device and xArm controller address:
+
+```bash
+cat > configs/local.toml <<'EOF'
+[serial]
+device = "/dev/ttyACM0"
+
+[physical_xarm]
+robot_ip = "192.168.1.XXX"
+EOF
+```
+
+The override is merged with the conservative limits in
+`configs/uarm_xarm6.toml`. Cameras are deliberately absent from the file: the
+backend discovers them at runtime and prefers stable `/dev/v4l/by-id` links.
+
+### 3. Configure the robot LAN
+
+Use a trusted wired network or an isolated Gigabit switch. One example subnet
+is:
+
+```text
+Follower PC:      192.168.1.100/24
+Operator PC:      192.168.1.101/24
+xArm controller:  192.168.1.XXX/24
+```
+
+Do not forward the console port from a router; the application does not provide
+authentication or TLS. When UFW is enabled, restrict the console to the
+operator PC:
+
+```bash
+sudo ufw allow from 192.168.1.101 to any port 8000 proto tcp
+```
+
+From the operator PC, verify the follower after starting `uarm-web`:
+
+```bash
+ping 192.168.1.100
+curl http://192.168.1.100:8000/api/health
+curl http://192.168.1.100:8000/api/cameras
+```
+
+### 4. Verify and launch
+
+On the follower PC, perform the read-only checks first:
+
+```bash
+conda activate uarm-teleop
+uarm-monitor --config configs/local.toml --once
+uarm-real --config configs/local.toml --once
+uarm-real --config configs/local.toml --robot-ip 192.168.1.XXX --inspect
+```
+
+Then expose the packaged console to the trusted robot LAN:
+
+```bash
+uarm-web --config configs/local.toml --host 0.0.0.0 --port 8000 --no-browser
+```
+
+On the operator PC, open `http://192.168.1.100:8000`. Select one or more
+discovered cameras, connect the leader, inspect the xArm, and run a dry run.
+Start physical motion only after the displayed target matches the physical
+xArm, all controller warnings are clear, the workspace is clear, and the
+hardware emergency stop is in hand.
 
 ## Check the leader
 
@@ -199,7 +334,8 @@ private override TOML.
 The browser console wraps the guarded hardware backends in an explicit
 supervisory state machine. It supports leader connection, read-only robot
 inspection, dry-run mapping, guarded physical start, live joint and gripper
-telemetry, session events, and software stop.
+telemetry, dynamically discovered camera streams, session events, and software
+stop.
 
 ```bash
 uarm-web
@@ -225,6 +361,25 @@ The normal workflow is:
 5. Use **Stop motion** or the hardware emergency stop. The UI control requests
    xArm state 4 but is not an emergency stop.
 
+### Camera streams
+
+The operator console discovers V4L2 cameras at runtime and never stores a
+`/dev/videoN` assignment in configuration. When udev provides stable
+`/dev/v4l/by-id` links, those links are preferred. Multi-interface devices such
+as depth cameras are grouped by their physical bus, so their preferred RGB
+source appears once instead of exposing metadata and depth nodes as separate
+cameras.
+
+Use the camera checkboxes in the console to start one or more feeds. Capture is
+opened only while a feed has browser subscribers, and multiple viewers of the
+same source share one capture worker. Browser video defaults to 1280x720 at 15
+FPS as a low-latency MJPEG stream on the same HTTP connection as the console.
+
+A video failure marks that feed offline, but it does not act as an emergency
+stop. Loss of the final telemetry WebSocket still requests the existing
+software stop; the hardware emergency stop remains the authoritative safety
+control.
+
 The last browser telemetry connection closing requests a software stop. A page
 reload or temporary browser/network failure may therefore stop a run, and a
 stopped physical session never resumes automatically.
@@ -237,7 +392,7 @@ development, run the API and Vite servers separately:
 ```bash
 uarm-web --no-browser
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 

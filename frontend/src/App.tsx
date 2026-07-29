@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
   AlertTriangle,
   Cable,
+  Camera,
   Check,
   CircleStop,
   Gauge,
@@ -13,10 +14,11 @@ import {
   ShieldCheck,
   Unplug,
   Usb,
+  VideoOff,
 } from "lucide-react";
-import { ApiError, commands } from "./api";
+import { ApiError, cameraStreamUrl, commands, getCameras } from "./api";
 import { getCapabilities } from "./state";
-import type { ControllerEvent, TeleopSnapshot } from "./types";
+import type { CameraInfo, ControllerEvent, TeleopSnapshot } from "./types";
 import { useTelemetry } from "./useTelemetry";
 
 const JOINTS = ["Base", "Shoulder", "Elbow", "Forearm", "Wrist", "Tool"];
@@ -63,6 +65,36 @@ function EventLog({ events }: { events: ControllerEvent[] }) {
         </div>
       ))}
     </div>
+  );
+}
+
+function CameraFeed({ camera }: { camera: CameraInfo }) {
+  const [status, setStatus] = useState<"connecting" | "live" | "offline">("connecting");
+
+  return (
+    <article className="camera-feed">
+      <div className="camera-feed-heading">
+        <div>
+          <strong>{camera.name}</strong>
+          <span>{camera.device}</span>
+        </div>
+        <span className={`camera-feed-status ${status}`}>{status}</span>
+      </div>
+      <div className="camera-frame">
+        {status !== "live" && (
+          <div className="camera-placeholder">
+            {status === "offline" ? <VideoOff size={24} /> : <Camera size={24} />}
+            <span>{status}</span>
+          </div>
+        )}
+        <img
+          src={cameraStreamUrl(camera.id)}
+          alt={`${camera.name} live view`}
+          onLoad={() => setStatus("live")}
+          onError={() => setStatus("offline")}
+        />
+      </div>
+    </article>
   );
 }
 
@@ -121,6 +153,10 @@ export function App() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [showPhysicalStart, setShowPhysicalStart] = useState(false);
+  const [cameras, setCameras] = useState<CameraInfo[]>([]);
+  const [selectedCameraIds, setSelectedCameraIds] = useState<string[]>([]);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [camerasLoading, setCamerasLoading] = useState(true);
 
   const capabilities = snapshot === null ? null : getCapabilities(snapshot);
   const active = capabilities?.active ?? false;
@@ -129,6 +165,26 @@ export function App() {
   const canStart = capabilities?.canStartDryRun ?? false;
   const canStartPhysical = capabilities?.canStartPhysical ?? false;
   const actualJoints = snapshot?.robot_status?.joint_degrees;
+  const selectedCameras = cameras.filter((camera) => selectedCameraIds.includes(camera.id));
+
+  async function refreshCameras() {
+    setCamerasLoading(true);
+    setCameraError(null);
+    try {
+      const available = await getCameras();
+      const availableIds = new Set(available.map((camera) => camera.id));
+      setCameras(available);
+      setSelectedCameraIds((current) => current.filter((id) => availableIds.has(id)));
+    } catch (error) {
+      setCameraError(error instanceof ApiError ? error.message : "Could not load camera sources");
+    } finally {
+      setCamerasLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void refreshCameras();
+  }, []);
 
   const statusTone = useMemo(() => {
     if (snapshot?.state === "fault") return "fault";
@@ -147,6 +203,14 @@ export function App() {
     } finally {
       setBusyAction(null);
     }
+  }
+
+  function toggleCamera(cameraId: string) {
+    setSelectedCameraIds((current) =>
+      current.includes(cameraId)
+        ? current.filter((id) => id !== cameraId)
+        : [...current, cameraId],
+    );
   }
 
   if (!snapshot) {
@@ -179,10 +243,10 @@ export function App() {
         </div>
       </header>
 
-      {(actionError || connectionError || snapshot.fault) && (
+      {(actionError || cameraError || connectionError || snapshot.fault) && (
         <div className="alert-banner">
           <AlertTriangle size={18} />
-          <span>{actionError ?? snapshot.fault ?? connectionError}</span>
+          <span>{actionError ?? cameraError ?? snapshot.fault ?? connectionError}</span>
         </div>
       )}
 
@@ -266,6 +330,48 @@ export function App() {
         </aside>
 
         <section className="telemetry-column">
+          <section className="panel camera-panel">
+            <div className="section-title camera-title">
+              <div><p className="eyebrow">Live vision</p><h2>Cameras</h2></div>
+              <div className="camera-title-actions">
+                <span>{selectedCameras.length} / {cameras.length} active</span>
+                <button
+                  className="icon-button"
+                  type="button"
+                  title="Refresh cameras"
+                  aria-label="Refresh cameras"
+                  disabled={camerasLoading}
+                  onClick={() => void refreshCameras()}
+                >
+                  <RefreshCw size={16} className={camerasLoading ? "spin" : ""} />
+                </button>
+              </div>
+            </div>
+
+            <div className="camera-picker" aria-label="Available cameras">
+              {cameras.map((camera) => (
+                <label className="camera-option" key={camera.id}>
+                  <input
+                    type="checkbox"
+                    checked={selectedCameraIds.includes(camera.id)}
+                    onChange={() => toggleCamera(camera.id)}
+                  />
+                  <Camera size={16} />
+                  <span><strong>{camera.name}</strong><small>{camera.device}</small></span>
+                </label>
+              ))}
+              {!camerasLoading && cameras.length === 0 && (
+                <div className="camera-empty"><VideoOff size={18} /> No cameras available</div>
+              )}
+            </div>
+
+            {selectedCameras.length > 0 && (
+              <div className="camera-grid">
+                {selectedCameras.map((camera) => <CameraFeed camera={camera} key={camera.id} />)}
+              </div>
+            )}
+          </section>
+
           <section className="panel pose-panel">
             <div className="section-title">
               <div><p className="eyebrow">Live telemetry</p><h2>Joint pose</h2></div>
