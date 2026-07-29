@@ -139,6 +139,8 @@ class TeleopController:
         self._operation_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._worker: threading.Thread | None = None
+        self._monitor_stop_event = threading.Event()
+        self._monitor: threading.Thread | None = None
 
         self._state = TeleopState.IDLE
         self._mode: TeleopMode | None = None
@@ -172,16 +174,92 @@ class TeleopController:
                 f"Operation is unavailable in state {self._state.value}; expected {choices}"
             )
 
-    def _update_sample(self, sample: LeaderSample, *, reset_safety: bool = False) -> None:
-        action = self._mapping.action(sample.radians)
-        if reset_safety:
-            self._safety.reset(action[:6])
-        else:
-            self._safety.validate(action[:6])
+    def _update_sample(
+        self,
+        sample: LeaderSample,
+        *,
+        reset_safety: bool = False,
+        validate_safety: bool = True,
+    ) -> None:
         with self._lock:
+            action = self._mapping.action(sample.radians)
+            if reset_safety:
+                self._safety.reset(action[:6])
+            elif validate_safety:
+                self._safety.validate(action[:6])
             self._sample = sample
             self._action = action
             self._last_sample_received = self._monotonic()
+
+    def _start_leader_monitor(self) -> None:
+        with self._lock:
+            if (
+                self._leader is None
+                or self._state
+                not in (TeleopState.LEADER_READY, TeleopState.READY, TeleopState.STOPPED)
+                or (self._monitor is not None and self._monitor.is_alive())
+            ):
+                return
+            self._monitor_stop_event.clear()
+            monitor = threading.Thread(
+                target=self._run_leader_monitor,
+                name="uarm-leader-monitor",
+                daemon=True,
+            )
+            self._monitor = monitor
+            monitor.start()
+
+    def _stop_leader_monitor(self, *, timeout: float = 2.0) -> None:
+        with self._lock:
+            monitor = self._monitor
+            self._monitor_stop_event.set()
+        if monitor is not None and monitor is not threading.current_thread():
+            monitor.join(timeout=timeout)
+            if monitor.is_alive():
+                raise TeleopControllerError("Leader monitor did not stop within the timeout")
+        with self._lock:
+            if self._monitor is monitor:
+                self._monitor = None
+
+    def _run_leader_monitor(self) -> None:
+        period = 1.0 / self._physical_config.rate
+        next_step = self._monotonic()
+        rate_started = next_step
+        rate_samples = 0
+        try:
+            while not self._monitor_stop_event.is_set():
+                with self._lock:
+                    leader = self._leader
+                if leader is None:
+                    return
+                sample = leader.read()
+                self._update_sample(sample, validate_safety=False)
+
+                now = self._monotonic()
+                rate_samples += 1
+                elapsed = now - rate_started
+                if elapsed >= 0.5:
+                    with self._lock:
+                        self._loop_rate_hz = rate_samples / elapsed
+                    rate_started = now
+                    rate_samples = 0
+
+                next_step += period
+                delay = next_step - self._monotonic()
+                if delay > 0:
+                    self._monitor_stop_event.wait(delay)
+                else:
+                    next_step = self._monotonic()
+        except Exception as error:  # noqa: BLE001 - monitor boundary owns serial reads
+            if not self._monitor_stop_event.is_set():
+                with self._lock:
+                    self._fault = str(error)
+                    self._state = TeleopState.FAULT
+                self._event("error", f"Leader monitoring failed: {error}")
+        finally:
+            with self._lock:
+                if self._monitor is threading.current_thread():
+                    self._monitor = None
 
     def connect_leader(self) -> TeleopSnapshot:
         with self._operation_lock:
@@ -207,6 +285,7 @@ class TeleopController:
             )
             if torque_ids:
                 self._event("warning", f"Leader torque is enabled on IDs {torque_ids}.")
+            self._start_leader_monitor()
             return self.snapshot()
 
     def inspect_robot(self, robot_ip: str) -> TeleopSnapshot:
@@ -218,46 +297,59 @@ class TeleopController:
                 self._require_state(TeleopState.LEADER_READY, TeleopState.STOPPED)
                 if self._leader is None or self._sample is None:
                     raise TeleopControllerError("Connect the leader before inspecting the robot")
-                old_follower = self._follower
-                self._follower = None
-                self._robot_status = None
-                self._state = TeleopState.LEADER_READY
-            if old_follower is not None:
-                old_follower.close()
-
-            physical = replace(self.config.physical_xarm, robot_ip=robot_ip)
-            config = validate_config(replace(self.config, physical_xarm=physical))
-            follower = self._follower_factory(config.physical_xarm)
+            self._stop_leader_monitor()
             try:
-                status = follower.inspect()
-            except Exception:
-                follower.close()
-                raise
+                return self._inspect_robot(robot_ip)
+            finally:
+                self._start_leader_monitor()
 
-            if config.xarm6.gripper_mode == "toggle":
-                midpoint = (physical.gripper_open_position + physical.gripper_closed_position) / 2.0
-                gripper_ratio = (physical.gripper_open_position - status.gripper_position) / (
-                    physical.gripper_open_position - physical.gripper_closed_position
-                )
+    def _inspect_robot(self, robot_ip: str) -> TeleopSnapshot:
+        with self._lock:
+            self._require_state(TeleopState.LEADER_READY, TeleopState.STOPPED)
+            assert self._leader is not None and self._sample is not None
+            old_follower = self._follower
+            self._follower = None
+            self._robot_status = None
+            self._state = TeleopState.LEADER_READY
+        if old_follower is not None:
+            old_follower.close()
+
+        physical = replace(self.config.physical_xarm, robot_ip=robot_ip)
+        config = validate_config(replace(self.config, physical_xarm=physical))
+        follower = self._follower_factory(config.physical_xarm)
+        try:
+            status = follower.inspect()
+        except Exception:
+            follower.close()
+            raise
+
+        if config.xarm6.gripper_mode == "toggle":
+            midpoint = (physical.gripper_open_position + physical.gripper_closed_position) / 2.0
+            gripper_ratio = (physical.gripper_open_position - status.gripper_position) / (
+                physical.gripper_open_position - physical.gripper_closed_position
+            )
+            with self._lock:
+                assert self._sample is not None
+                sample = self._sample
                 self._mapping.reset_gripper(
-                    float(self._sample.radians[6]),
+                    float(sample.radians[6]),
                     closed=status.gripper_position < midpoint,
                     command=float(np.clip(gripper_ratio, 0.0, 1.0))
                     * config.xarm6.gripper_command_max,
                 )
-                self._update_sample(self._sample, reset_safety=True)
+                self._update_sample(sample, reset_safety=True)
 
-            with self._lock:
-                self.config = config
-                self._physical_config = physical
-                self._safety = TargetSafety(physical)
-                assert self._action is not None
-                self._safety.reset(self._action[:6])
-                self._follower = follower
-                self._robot_status = status
-                self._state = TeleopState.READY
-            self._event("info", f"Robot {robot_ip} inspected read-only and is ready for checks.")
-            return self.snapshot()
+        with self._lock:
+            self.config = config
+            self._physical_config = physical
+            self._safety = TargetSafety(physical)
+            assert self._action is not None
+            self._safety.reset(self._action[:6])
+            self._follower = follower
+            self._robot_status = status
+            self._state = TeleopState.READY
+        self._event("info", f"Robot {robot_ip} inspected read-only and is ready for checks.")
+        return self.snapshot()
 
     def start(
         self,
@@ -272,42 +364,55 @@ class TeleopController:
                 self._require_state(
                     TeleopState.LEADER_READY, TeleopState.READY, TeleopState.STOPPED
                 )
-                if self._worker is not None and self._worker.is_alive():
-                    raise TeleopControllerError("A teleoperation worker is already running")
-                if self._leader is None or self._sample is None or self._action is None:
-                    raise TeleopControllerError("The leader is not connected")
-                if mode == "physical":
-                    if self._follower is None or not self._physical_config.robot_ip:
-                        raise TeleopControllerError("Inspect the physical robot before starting")
-                    if (
-                        confirmation is None
-                        or confirmation.strip() != self._physical_config.robot_ip
-                    ):
-                        raise TeleopControllerError(
-                            "Confirmation did not match the inspected robot IP; motion remains disabled"
-                        )
-                    if self._leader.torque_enabled_ids:
-                        raise TeleopControllerError(
-                            "Leader torque is enabled; physical teleoperation is blocked"
-                        )
-                    require_safe_leader_start(self.config, self._sample)
+            self._stop_leader_monitor()
+            try:
+                return self._start(mode, confirmation=confirmation)
+            except Exception:
+                self._start_leader_monitor()
+                raise
 
-                self._mode = mode
-                self._fault = None
-                self._loop_rate_hz = 0.0
-                self._state = TeleopState.STARTING
-                self._stop_event.clear()
-                self._worker = threading.Thread(
-                    target=self._run_loop,
-                    name="uarm-teleop-controller",
-                    daemon=True,
-                )
-                self._worker.start()
-            self._event(
-                "warning" if mode == "physical" else "info",
-                "Starting physical motion." if mode == "physical" else "Starting dry run.",
+    def _start(
+        self,
+        mode: TeleopMode,
+        *,
+        confirmation: str | None,
+    ) -> TeleopSnapshot:
+        with self._lock:
+            self._require_state(TeleopState.LEADER_READY, TeleopState.READY, TeleopState.STOPPED)
+            if self._worker is not None and self._worker.is_alive():
+                raise TeleopControllerError("A teleoperation worker is already running")
+            if self._leader is None or self._sample is None or self._action is None:
+                raise TeleopControllerError("The leader is not connected")
+            if mode == "physical":
+                if self._follower is None or not self._physical_config.robot_ip:
+                    raise TeleopControllerError("Inspect the physical robot before starting")
+                if confirmation is None or confirmation.strip() != self._physical_config.robot_ip:
+                    raise TeleopControllerError(
+                        "Confirmation did not match the inspected robot IP; motion remains disabled"
+                    )
+                if self._leader.torque_enabled_ids:
+                    raise TeleopControllerError(
+                        "Leader torque is enabled; physical teleoperation is blocked"
+                    )
+                require_safe_leader_start(self.config, self._sample)
+
+            self._safety.reset(self._action[:6])
+            self._mode = mode
+            self._fault = None
+            self._loop_rate_hz = 0.0
+            self._state = TeleopState.STARTING
+            self._stop_event.clear()
+            self._worker = threading.Thread(
+                target=self._run_loop,
+                name="uarm-teleop-controller",
+                daemon=True,
             )
-            return self.snapshot()
+            self._worker.start()
+        self._event(
+            "warning" if mode == "physical" else "info",
+            "Starting physical motion." if mode == "physical" else "Starting dry run.",
+        )
+        return self.snapshot()
 
     def _run_loop(self) -> None:
         mode = self._mode
@@ -394,6 +499,7 @@ class TeleopController:
                 self._worker = None
             if not faulted:
                 self._event("info", "Teleoperation stopped; physical motion is disabled.")
+                self._start_leader_monitor()
 
     def stop(self, *, timeout: float = 2.0) -> TeleopSnapshot:
         with self._operation_lock:
@@ -419,6 +525,7 @@ class TeleopController:
     def disconnect(self) -> TeleopSnapshot:
         self.stop()
         with self._operation_lock:
+            self._stop_leader_monitor()
             with self._lock:
                 if self._worker is not None and self._worker.is_alive():
                     raise TeleopControllerError(

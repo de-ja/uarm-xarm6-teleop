@@ -1,3 +1,4 @@
+import threading
 import time
 import unittest
 
@@ -14,9 +15,18 @@ from uarm_xarm6_teleop.feetech import LeaderSample
 
 
 class FakeLeader:
-    def __init__(self, _serial, _leader, *, torque_ids=(), fail_after=None):
+    def __init__(
+        self,
+        _serial,
+        _leader,
+        *,
+        torque_ids=(),
+        fail_event=None,
+        step_radians=0.0,
+    ):
         self.torque_enabled_ids = torque_ids
-        self.fail_after = fail_after
+        self.fail_event = fail_event
+        self.step_radians = step_radians
         self.opened = False
         self.closed = False
         self.read_count = 0
@@ -26,12 +36,12 @@ class FakeLeader:
 
     def read(self):
         self.read_count += 1
-        if self.fail_after is not None and self.read_count > self.fail_after:
+        if self.fail_event is not None and self.fail_event.is_set():
             raise OSError("leader sample failed")
         return LeaderSample(
             timestamp=time.monotonic(),
             positions=(2047,) * 7,
-            radians=np.zeros(7, dtype=float),
+            radians=np.full(7, self.read_count * self.step_radians, dtype=float),
         )
 
     def close(self):
@@ -92,13 +102,14 @@ class ControllerTests(unittest.TestCase):
         self.leaders = []
         self.followers = []
 
-    def make_controller(self, *, torque_ids=(), fail_after=None):
+    def make_controller(self, *, torque_ids=(), fail_event=None, step_radians=0.0):
         def leader_factory(serial, leader):
             fake = FakeLeader(
                 serial,
                 leader,
                 torque_ids=torque_ids,
-                fail_after=fail_after,
+                fail_event=fail_event,
+                step_radians=step_radians,
             )
             self.leaders.append(fake)
             return fake
@@ -134,6 +145,22 @@ class ControllerTests(unittest.TestCase):
             time.sleep(0.005)
         raise AssertionError(f"timed out waiting for {description}")
 
+    def test_connect_starts_continuous_read_only_leader_monitoring(self):
+        controller = self.make_controller(step_radians=0.001)
+        initial = controller.connect_leader()
+        initial_degrees = initial.leader_degrees
+        self.assertIsNotNone(initial_degrees)
+
+        self.wait_for(lambda: self.leaders[0].read_count >= 4, "continuous leader samples")
+        current = controller.snapshot()
+
+        self.assertEqual(current.state, TeleopState.LEADER_READY.value)
+        self.assertIsNone(current.mode)
+        self.assertGreater(current.leader_degrees[0], initial_degrees[0])
+        self.assertLess(current.last_sample_age_ms, 100.0)
+        self.assertEqual(self.followers, [])
+        controller.disconnect()
+
     def test_dry_run_lifecycle_never_opens_robot(self):
         controller = self.make_controller()
         controller.connect_leader()
@@ -147,6 +174,11 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(controller.state, TeleopState.STOPPED)
         self.assertGreater(self.leaders[0].read_count, 1)
         self.assertEqual(self.followers, [])
+        stopped_count = self.leaders[0].read_count
+        self.wait_for(
+            lambda: self.leaders[0].read_count > stopped_count,
+            "leader monitoring to resume",
+        )
         controller.disconnect()
         self.assertTrue(self.leaders[0].closed)
         self.assertEqual(controller.state, TeleopState.IDLE)
@@ -183,16 +215,31 @@ class ControllerTests(unittest.TestCase):
         controller.close()
 
     def test_worker_fault_safe_stops_physical_follower(self):
-        controller = self.make_controller(fail_after=1)
+        fail_event = threading.Event()
+        controller = self.make_controller(fail_event=fail_event)
         controller.connect_leader()
         controller.inspect_robot("192.0.2.8")
         controller.start("physical", confirmation="192.0.2.8")
+        self.wait_for_state(controller, TeleopState.RUNNING)
+        fail_event.set()
         self.wait_for_state(controller, TeleopState.FAULT)
 
         self.assertTrue(self.followers[0].stopped)
         self.assertIn("leader sample failed", controller.snapshot().fault)
         controller.reset_fault()
         self.assertEqual(controller.state, TeleopState.IDLE)
+
+    def test_monitor_failure_enters_fault_without_opening_robot(self):
+        fail_event = threading.Event()
+        controller = self.make_controller(fail_event=fail_event)
+        controller.connect_leader()
+        fail_event.set()
+        self.wait_for_state(controller, TeleopState.FAULT)
+
+        snapshot = controller.snapshot()
+        self.assertIn("leader sample failed", snapshot.fault)
+        self.assertEqual(self.followers, [])
+        controller.reset_fault()
 
 
 if __name__ == "__main__":

@@ -214,8 +214,8 @@ uarm-web --config configs/local.toml --no-browser
 
 The normal workflow is:
 
-1. Connect the leader. This is read-only; torque-enabled leader IDs are shown
-   as a warning.
+1. Connect the leader. This is read-only; the leader pose and mapped target are
+   sampled continuously, and torque-enabled leader IDs are shown as a warning.
 2. Enter the xArm controller IP and inspect it. Inspection cannot enable
    motion.
 3. Start a dry run and confirm the displayed targets first.
