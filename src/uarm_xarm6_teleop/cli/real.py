@@ -62,9 +62,12 @@ def print_status(status: XArmStatus) -> None:
     gripper_state = {0: "stopped", 1: "moving", 2: "grasping"}.get(
         status.gripper_status, "unavailable"
     )
+    gripper_force = (
+        "unavailable" if status.gripper_force is None else str(status.gripper_force)
+    )
     print(
         f"xArm Gripper G2: {status.gripper_position} mm, force "
-        f"{status.gripper_force}, state {gripper_state}, "
+        f"{gripper_force}, state {gripper_state}, "
         f"error {status.gripper_error_code}"
     )
 

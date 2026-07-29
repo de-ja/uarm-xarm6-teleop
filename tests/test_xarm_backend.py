@@ -120,6 +120,17 @@ class XArmBackendTests(unittest.TestCase):
         self.assertEqual(status.joint_degrees[1], -75.0)
         self.assertFalse(any(call[0] == "motion_enable" for call in fake.calls))
 
+    def test_inspection_accepts_sdk_without_public_g2_force_getter(self):
+        fake = FakeArm("192.0.2.1", joints=self.reference)
+        fake.get_gripper_g2_force = None
+        backend = XArm6Hardware(self.config, api_factory=lambda *_args, **_kwargs: fake)
+
+        status = backend.inspect()
+        backend.close()
+
+        self.assertIsNone(status.gripper_force)
+        self.assertFalse(any(call[0] == "motion_enable" for call in fake.calls))
+
     def test_padded_seven_value_sdk_sample_is_accepted_for_xarm6(self):
         joints = np.concatenate([self.reference, [0.0]])
         backend, _fake = self.make_backend(joints=joints)
@@ -152,6 +163,19 @@ class XArmBackendTests(unittest.TestCase):
         self.assertEqual(gripper_call[2]["speed"], 50)
         self.assertEqual(gripper_call[2]["force"], 20)
         self.assertIn(("set_state", 4), fake.calls)
+
+    def test_ready_feedback_state_accepts_commands(self):
+        backend, fake = self.make_backend()
+        backend.arm_motion(self.reference)
+        fake.state = 2
+
+        backend.command(
+            np.concatenate([self.reference, [0.0]]),
+            gripper_command_max=0.81,
+        )
+        backend.close()
+
+        self.assertTrue(any(call[0] == "set_servo_angle" for call in fake.calls))
 
     def test_g2_grasp_status_freezes_closing_until_open_command(self):
         backend, fake = self.make_backend()

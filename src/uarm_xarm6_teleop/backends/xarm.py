@@ -34,7 +34,7 @@ class XArmStatus:
     warning_code: int
     joint_degrees: tuple[float, ...]
     gripper_position: int
-    gripper_force: int
+    gripper_force: int | None
     gripper_status: int | None
     gripper_error_code: int
 
@@ -138,8 +138,12 @@ class XArm6Hardware:
             joints = joints[:axis]
             code, gripper = self.arm.get_gripper_g2_position()
             self._check_code("get_gripper_g2_position", code)
-            code, gripper_force = self.arm.get_gripper_g2_force()
-            self._check_code("get_gripper_g2_force", code)
+            gripper_force = None
+            get_gripper_force = getattr(self.arm, "get_gripper_g2_force", None)
+            if callable(get_gripper_force):
+                code, force = get_gripper_force()
+                if code == 0:
+                    gripper_force = int(force)
             status_code, gripper_status = self.arm.get_gripper_status()
             if status_code != 0:
                 gripper_status = None
@@ -155,7 +159,7 @@ class XArm6Hardware:
                 warning_code=int(errors[1]),
                 joint_degrees=tuple(float(value) for value in np.rad2deg(joints)),
                 gripper_position=int(gripper),
-                gripper_force=int(gripper_force),
+                gripper_force=gripper_force,
                 gripper_status=(
                     None if gripper_status is None else int(gripper_status) & 0x03
                 ),
@@ -229,7 +233,9 @@ class XArm6Hardware:
 
             code, state = self.arm.get_state()
             self._check_code("get_state", code)
-            if state not in (0, 1):
+            # set_state(0) enables motion, then the controller may report state 2
+            # to mean READY while it is waiting for the next motion command.
+            if state not in (0, 1, 2):
                 raise XArmHardwareError(f"xArm entered non-motion state {state}")
             code, errors = self.arm.get_err_warn_code()
             self._check_code("get_err_warn_code", code)
