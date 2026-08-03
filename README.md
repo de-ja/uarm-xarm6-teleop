@@ -128,21 +128,35 @@ The final command should open a window containing the visible xArm6 follower.
 
 ## Follower and operator PC deployment
 
-The operator PC runs only a modern browser. The follower PC owns every hardware
-connection and runs the Python backend:
+There are two supported layouts. A single-backend layout keeps the U-ARM and
+xArm connections on the follower PC. A distributed layout lets the laptop own
+the U-ARM while the desktop owns the xArm. The distributed data paths are:
 
 ```text
-Operator browser
-  `- TCP 8000 (HTTP, WebSocket telemetry, MJPEG video)
-       `- follower PC
-            |- USB serial -> Feetech U-ARM
-            |- USB -> V4L2 cameras
-            `- Ethernet/xArm SDK -> xArm6 controller
+Laptop                                      Desktop follower
+USB -> U-ARM -> uarm-leader --port 8765 --> uarm-web -> xArm SDK -> xArm6
+Browser ----------------------------------> uarm-web --port 8000
+                                             `- USB -> V4L2 cameras
 ```
 
-The browser sends supervisory operations such as inspect, start, and stop. The
-20 Hz leader sampling, mapping, safety checks, and xArm commands remain local to
-the follower PC.
+The browser still sends only supervisory operations such as inspect, start,
+and stop. It never reads USB. The desktop `uarm-web` backend requests one fresh
+sample at a time from the laptop service, then performs mapping, safety checks,
+and xArm commands locally. A delayed sample cannot build up in a command queue,
+and loss of the leader connection faults the controller while the desktop's
+xArm watchdog remains authoritative.
+
+### Distributed U-ARM laptop and xArm desktop
+
+Use this layout when the U-ARM is plugged into the laptop. Both computers join
+the same private hotspot or router network; internet access is not required.
+Installation, token handling, network configuration, launch commands, safety
+behavior, and troubleshooting are covered in the dedicated
+[`docs/wireless-teleop.md`](docs/wireless-teleop.md) guide.
+
+For the older single-backend layout, connect the U-ARM to the desktop and omit
+`--leader-url` and `--leader-token-file`. The remaining setup below applies to
+that layout as well.
 
 ### 1. Install the follower runtime
 
@@ -155,7 +169,7 @@ cd uarm-xarm6-teleop
 conda create -n uarm-teleop --override-channels -c conda-forge python=3.11
 conda activate uarm-teleop
 python -m pip install --upgrade pip
-python -m pip install -e ".[physical,web]"
+python -m pip install -e ".[physical,web,remote]"
 sudo usermod -aG dialout,video "$USER"
 ```
 

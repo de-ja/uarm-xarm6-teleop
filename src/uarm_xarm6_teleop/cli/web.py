@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import threading
 import webbrowser
+from functools import partial
 
 from ..config import load_config
 from ..controller import TeleopController
+from ..remote_leader import RemoteLeader, RemoteLeaderError, load_token_file
 
 
 def parse_args() -> argparse.Namespace:
@@ -16,6 +18,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1", help="HTTP bind address")
     parser.add_argument("--port", type=int, default=8000, help="HTTP port")
     parser.add_argument(
+        "--leader-url",
+        help="laptop leader service URL, for example ws://192.168.50.1:8765",
+    )
+    parser.add_argument(
+        "--leader-token-file",
+        help="path to the private token shared with the laptop leader service",
+    )
+    parser.add_argument(
+        "--leader-timeout",
+        type=float,
+        default=0.2,
+        help="remote leader connect/read timeout in seconds (default: 0.2)",
+    )
+    parser.add_argument(
         "--no-browser",
         action="store_true",
         help="do not open the operator console in the default browser",
@@ -23,6 +39,10 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
+    if bool(args.leader_url) != bool(args.leader_token_file):
+        parser.error("--leader-url and --leader-token-file must be provided together")
+    if args.leader_timeout <= 0:
+        parser.error("--leader-timeout must be positive")
     return args
 
 
@@ -37,7 +57,21 @@ def main() -> None:
         ) from error
 
     args = parse_args()
-    controller = TeleopController(load_config(args.config))
+    try:
+        config = load_config(args.config)
+        if args.leader_url:
+            token = load_token_file(args.leader_token_file)
+            leader_factory = partial(
+                RemoteLeader,
+                url=args.leader_url,
+                token=token,
+                timeout=args.leader_timeout,
+            )
+            controller = TeleopController(config, leader_factory=leader_factory)
+        else:
+            controller = TeleopController(config)
+    except (OSError, RemoteLeaderError, ValueError) as error:
+        raise SystemExit(f"Could not start uarm-web: {error}") from error
     application = create_app(controller)
     if not args.no_browser:
         url_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host

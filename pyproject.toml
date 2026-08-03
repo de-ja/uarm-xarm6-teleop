@@ -27,6 +27,9 @@ web = [
     "opencv-python>=4.10,<5.1",
     "uvicorn[standard]>=0.34,<1",
 ]
+remote = [
+    "websockets>=15,<17",
+]
 dev = [
     "pytest>=8,<9",
     "ruff>=0.12,<1",
@@ -34,6 +37,7 @@ dev = [
 
 [project.scripts]
 uarm-monitor = "uarm_xarm6_teleop.cli.monitor:main"
+uarm-leader = "uarm_xarm6_teleop.cli.leader:main"
 uarm-real = "uarm_xarm6_teleop.cli.real:main"
 uarm-sim = "uarm_xarm6_teleop.cli.sim:main"
 uarm-tune-reference = "uarm_xarm6_teleop.cli.tune_reference:main"

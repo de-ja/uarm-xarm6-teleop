@@ -292,8 +292,12 @@ class TeleopController:
                 torque_ids = leader.torque_enabled_ids
             self._event(
                 "info",
-                f"Leader connected on {self.config.serial.device} at "
-                f"{self.config.serial.baudrate} baud.",
+                (
+                    f"Leader connected through {leader.description}."
+                    if getattr(leader, "description", None)
+                    else f"Leader connected on {self.config.serial.device} at "
+                    f"{self.config.serial.baudrate} baud."
+                ),
             )
             if torque_ids:
                 self._event("warning", f"Leader torque is enabled on IDs {torque_ids}.")
