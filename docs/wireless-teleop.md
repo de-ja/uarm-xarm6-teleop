@@ -8,22 +8,27 @@ router. The network does not need internet access.
 
 ```text
 Laptop                                             Desktop follower
-USB -> U-ARM -> uarm-leader (TCP 8765) ----------> uarm-web -> xArm SDK -> xArm6
-Browser -----------------------------------------> uarm-web (TCP 8000)
+USB -> U-ARM -> uarm-leader (TCP 8765) ----------> uarm-station -> xArm SDK -> xArm6
+Browser -----------------------------------------> web console (TCP 8000)
                                                     `- USB -> V4L2 cameras
 ```
 
 The browser is only the operator interface. It never reads the U-ARM. The
-desktop `uarm-web` backend authenticates to the laptop's `uarm-leader` service
+desktop backend authenticates to the laptop's `uarm-leader` service
 and requests one fresh seven-servo sample for each controller update. Mapping,
 safety validation, physical commands, and the xArm watchdog remain on the
 desktop.
 
 The laptop and desktop therefore use two independent connections:
 
-- Desktop `uarm-web` connects to laptop TCP port 8765 for leader samples.
+- Desktop backend connects to laptop TCP port 8765 for leader samples.
 - Laptop browser connects to desktop TCP port 8000 for the UI, telemetry, and
   video.
+
+Clicking **Connect leader** from the laptop browser lets the desktop derive the
+laptop's source address automatically. The browser does not carry joint data;
+it only pairs the existing direct backend connection. No address is entered in
+the application.
 
 ## Requirements
 
@@ -98,13 +103,14 @@ Connect the desktop to the laptop hotspot, or connect both computers to a
 private router. Internet access is not required. Do not use client-isolated
 public Wi-Fi such as a school guest network.
 
-Find both private addresses:
+The desktop station prints its usable console addresses automatically. These
+commands are still useful for network diagnostics:
 
 ```bash
 ip -4 -brief address
 ```
 
-Verify connectivity in both directions, replacing the placeholders:
+If needed, verify connectivity in both directions, replacing the placeholders:
 
 ```bash
 # Run on the desktop
@@ -171,8 +177,8 @@ controller address:
 robot_ip = "192.168.1.XXX"
 ```
 
-The desktop's configured serial device is not opened when `--leader-url` is
-used. Both computers retain the default servo ID order from the base
+The desktop's configured serial device is not opened in browser-paired mode.
+Both computers retain the default servo ID order from the base
 configuration, and the connection is rejected if those IDs differ.
 
 ## 5. Verify and start the laptop leader
@@ -184,40 +190,37 @@ conda activate uarm-teleop
 uarm-monitor --config ~/.config/uarm/laptop.toml --once
 ```
 
-Then start the leader service, binding it to the laptop's private Wi-Fi address:
+Then start the leader service. It binds to all laptop interfaces and uses the
+standard token path by default:
 
 ```bash
-uarm-leader \
-  --config ~/.config/uarm/laptop.toml \
-  --host LAPTOP_PRIVATE_IP \
-  --port 8765 \
-  --token-file ~/.config/uarm/leader.token
+uarm-leader --config ~/.config/uarm/laptop.toml
 ```
+
+If the U-ARM is already `/dev/ttyACM0`, plain `uarm-leader` is sufficient.
 
 Leave this terminal running. Do not run `uarm-monitor` or another leader
 process at the same time because only one process can own the serial port.
 
 ## 6. Start the desktop follower backend
 
-With the xArm connected to the desktop, run:
+With the xArm connected to the desktop, run and press Enter:
 
 ```bash
 conda activate uarm-teleop
-uarm-web \
-  --config ~/.config/uarm/desktop.toml \
-  --leader-url ws://LAPTOP_PRIVATE_IP:8765/ws/leader \
-  --leader-token-file ~/.config/uarm/leader.token \
-  --host DESKTOP_PRIVATE_IP \
-  --port 8000 \
-  --no-browser
+uarm-station
 ```
+
+The station automatically loads `~/.config/uarm/desktop.toml` when present,
+binds the console to the desktop's network interfaces, and prints the LAN URLs
+that can be opened from the laptop. It does not ask for the laptop IP.
 
 The default remote-leader timeout is 200 ms. Do not increase it beyond the
 physical xArm watchdog timeout without reviewing the fail-safe behavior.
 
 ## 7. Connect from the laptop browser
 
-Open this URL on the laptop:
+Open one of the URLs printed by `uarm-station` on the laptop, for example:
 
 ```text
 http://DESKTOP_PRIVATE_IP:8000
@@ -234,8 +237,11 @@ Use this first-run sequence:
 6. Start physical mode only after pose, limits, controller state, workspace,
    and emergency-stop readiness have been checked.
 
-The browser is not in the leader-sample path. Closing the final telemetry page
-still requests the existing software stop during physical operation.
+The **Connect leader** request supplies the laptop source address to the
+desktop, which then opens the authenticated WebSocket connection back to
+`uarm-leader`. The browser is not in the leader-sample path. Closing the final
+telemetry page still requests the existing software stop during physical
+operation.
 
 ## Firewall rules
 
@@ -273,7 +279,8 @@ Do not forward either port through an internet-facing router.
 `Connection refused` or `Could not connect`:
 
 - Confirm `uarm-leader` is still running.
-- Confirm `--host` uses the laptop's private address, not `127.0.0.1`.
+- Confirm **Connect leader** was clicked in the laptop browser, not a browser
+  running on the desktop.
 - From the desktop, run `nc -vz LAPTOP_PRIVATE_IP 8765`.
 - Check the laptop firewall rule.
 
@@ -301,10 +308,10 @@ chmod 600 ~/.config/uarm/leader.token
 
 The webpage does not open:
 
-- Confirm `uarm-web` is running on the desktop.
+- Confirm `uarm-station` is running on the desktop.
 - From the laptop, run
   `curl http://DESKTOP_PRIVATE_IP:8000/api/health`.
-- Check the desktop firewall rule and confirm `--host` is not `127.0.0.1`.
+- Check the desktop firewall rule.
 
 The xArm is unreachable while Wi-Fi works:
 
@@ -317,5 +324,5 @@ The xArm is unreachable while Wi-Fi works:
 
 1. Stop physical motion from the UI and verify the xArm is no longer moving.
 2. Disconnect the controller in the UI.
-3. Stop `uarm-web` on the desktop with Ctrl-C.
+3. Stop `uarm-station` on the desktop with Ctrl-C.
 4. Stop `uarm-leader` on the laptop with Ctrl-C.

@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from pydantic import ValidationError
 
 from uarm_xarm6_teleop.camera import CameraInfo, CameraManager
@@ -152,6 +152,34 @@ class WebApiTests(unittest.TestCase):
             _invoke(self.controller.connect_leader)
         self.assertEqual(raised.exception.status_code, 409)
         self.assertIn("already connected", raised.exception.detail)
+
+    def test_connect_leader_pairs_from_the_browser_source_address(self):
+        class StubPairingFactory:
+            host = None
+
+            def pair_browser(self, host):
+                self.host = host
+
+        pairing = StubPairingFactory()
+        app = create_app(self.controller, browser_leader_factory=pairing)
+        route = next(route for route in app.routes if route.path == "/api/leader/connect")
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/leader/connect",
+                "headers": [],
+                "query_string": b"",
+                "client": ("10.42.0.15", 51234),
+                "server": ("10.42.0.20", 8000),
+                "scheme": "http",
+            }
+        )
+
+        result = route.endpoint(request)
+
+        self.assertEqual(pairing.host, "10.42.0.15")
+        self.assertEqual(result["state"], "leader_ready")
 
     def test_invalid_mode_is_rejected_by_schema(self):
         self.assertEqual(StartRequest.model_validate({"mode": "simulation"}).mode, "simulation")

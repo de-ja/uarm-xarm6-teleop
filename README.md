@@ -134,8 +134,8 @@ the U-ARM while the desktop owns the xArm. The distributed data paths are:
 
 ```text
 Laptop                                      Desktop follower
-USB -> U-ARM -> uarm-leader --port 8765 --> uarm-web -> xArm SDK -> xArm6
-Browser ----------------------------------> uarm-web --port 8000
+USB -> U-ARM -> uarm-leader --------------> uarm-station -> xArm SDK -> xArm6
+Browser ----------------------------------> web console :8000
                                              `- USB -> V4L2 cameras
 ```
 
@@ -150,9 +150,30 @@ xArm watchdog remains authoritative.
 
 Use this layout when the U-ARM is plugged into the laptop. Both computers join
 the same private hotspot or router network; internet access is not required.
-Installation, token handling, network configuration, launch commands, safety
-behavior, and troubleshooting are covered in the dedicated
-[`docs/wireless-teleop.md`](docs/wireless-teleop.md) guide.
+Copy the same private token to `~/.config/uarm/leader.token` on both computers.
+Then start the laptop service:
+
+```bash
+uarm-leader
+```
+
+Start the desktop station and press Enter:
+
+```bash
+uarm-station
+```
+
+The station prints its LAN console addresses. Open one on the **laptop** and
+click **Connect leader**. The desktop derives the laptop address from that HTTP
+request and connects to `uarm-leader` automatically. You do not enter either
+computer's IP, and SSH and internet access are not required. If multiple URLs
+are printed, use the one on the router network shared by both computers.
+
+Both commands use `~/.config/uarm/leader.token` by default. `uarm-station` also
+loads `~/.config/uarm/desktop.toml` automatically when it exists. Keep the
+token out of Git and use this only on a trusted private router or hotspot.
+See the complete [wireless teleoperation guide](docs/wireless-teleop.md) for
+installation, token creation, firewall, safety, and troubleshooting details.
 
 For the older single-backend layout, connect the U-ARM to the desktop and omit
 `--leader-url` and `--leader-token-file`. The remaining setup below applies to

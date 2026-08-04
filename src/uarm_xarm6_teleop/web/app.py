@@ -11,7 +11,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,6 +22,7 @@ from ..camera import CameraError, CameraManager
 from ..config import TeleopConfig, load_config
 from ..controller import TeleopController, TeleopControllerError, TeleopSnapshot
 from ..feetech import FeetechError
+from ..remote_leader import BrowserPairedRemoteLeaderFactory, RemoteLeaderError
 
 
 class RobotRequest(BaseModel):
@@ -58,7 +59,14 @@ class TelemetryClients:
 def _invoke(operation: Callable[[], TeleopSnapshot]) -> dict[str, object]:
     try:
         return operation().to_dict()
-    except (TeleopControllerError, FeetechError, XArmHardwareError, ValueError, OSError) as error:
+    except (
+        TeleopControllerError,
+        FeetechError,
+        RemoteLeaderError,
+        XArmHardwareError,
+        ValueError,
+        OSError,
+    ) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 
@@ -67,6 +75,7 @@ def create_app(
     *,
     config: TeleopConfig | None = None,
     camera_manager: CameraManager | None = None,
+    browser_leader_factory: BrowserPairedRemoteLeaderFactory | None = None,
 ) -> FastAPI:
     active_controller = controller or TeleopController(config or load_config())
     active_cameras = camera_manager or CameraManager()
@@ -134,7 +143,14 @@ def create_app(
         return {"mode": "auto", "jpeg_quality": quality}
 
     @app.post("/api/leader/connect")
-    def connect_leader() -> dict[str, object]:
+    def connect_leader(request: Request) -> dict[str, object]:
+        if browser_leader_factory is not None:
+            if request.client is None:
+                raise HTTPException(status_code=409, detail="Browser source address is unavailable")
+            try:
+                browser_leader_factory.pair_browser(request.client.host)
+            except (RemoteLeaderError, ValueError) as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
         return _invoke(active_controller.connect_leader)
 
     @app.post("/api/robot/inspect")

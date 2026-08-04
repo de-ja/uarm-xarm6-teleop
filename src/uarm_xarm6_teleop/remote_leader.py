@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import secrets
 import stat
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -20,6 +22,7 @@ REMOTE_LEADER_PROTOCOL = 1
 REMOTE_LEADER_PATH = "/ws/leader"
 MAX_MESSAGE_BYTES = 4096
 MIN_TOKEN_LENGTH = 32
+DEFAULT_REMOTE_TOKEN_PATH = Path("~/.config/uarm/leader.token").expanduser()
 
 
 class RemoteLeaderError(RuntimeError):
@@ -256,6 +259,58 @@ class RemoteLeader:
 
     def __exit__(self, _exc_type, _exc_value, _traceback) -> None:
         self.close()
+
+
+def leader_url_for_host(host: str, *, port: int = 8765) -> str:
+    """Build a leader URL from an observed browser source address."""
+    try:
+        address = ipaddress.ip_address(host.strip())
+    except ValueError as error:
+        raise RemoteLeaderError(f"Browser source address is invalid: {host}") from error
+    if not 1 <= port <= 65535:
+        raise ValueError("Remote leader port must be between 1 and 65535")
+    authority = f"[{address}]" if address.version == 6 else str(address)
+    return f"ws://{authority}:{port}{REMOTE_LEADER_PATH}"
+
+
+class BrowserPairedRemoteLeaderFactory:
+    """Create a remote leader using the address observed from the operator browser."""
+
+    def __init__(self, *, token: str, port: int = 8765, timeout: float = 0.2):
+        if len(token) < MIN_TOKEN_LENGTH:
+            raise RemoteLeaderError(
+                f"Remote leader token must contain at least {MIN_TOKEN_LENGTH} characters"
+            )
+        if not 1 <= port <= 65535:
+            raise ValueError("Remote leader port must be between 1 and 65535")
+        if timeout <= 0:
+            raise ValueError("Remote leader timeout must be positive")
+        self.token = token
+        self.port = port
+        self.timeout = timeout
+        self._lock = threading.Lock()
+        self._url: str | None = None
+
+    def pair_browser(self, host: str) -> str:
+        url = leader_url_for_host(host, port=self.port)
+        with self._lock:
+            self._url = url
+        return url
+
+    def __call__(self, serial: SerialConfig, leader: LeaderConfig) -> RemoteLeader:
+        with self._lock:
+            url = self._url
+        if url is None:
+            raise RemoteLeaderError(
+                "Open the console from the leader laptop before connecting the U-ARM"
+            )
+        return RemoteLeader(
+            serial,
+            leader,
+            url=url,
+            token=self.token,
+            timeout=self.timeout,
+        )
 
 
 class RemoteLeaderService:

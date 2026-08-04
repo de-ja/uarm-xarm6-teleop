@@ -40,6 +40,7 @@ uarm-monitor = "uarm_xarm6_teleop.cli.monitor:main"
 uarm-leader = "uarm_xarm6_teleop.cli.leader:main"
 uarm-real = "uarm_xarm6_teleop.cli.real:main"
 uarm-sim = "uarm_xarm6_teleop.cli.sim:main"
+uarm-station = "uarm_xarm6_teleop.cli.station:main"
 uarm-tune-reference = "uarm_xarm6_teleop.cli.tune_reference:main"
 uarm-web = "uarm_xarm6_teleop.cli.web:main"
 

@@ -7,6 +7,7 @@ import asyncio
 
 from ..feetech import FeetechError, FeetechLeader
 from ..remote_leader import (
+    DEFAULT_REMOTE_TOKEN_PATH,
     MAX_MESSAGE_BYTES,
     RemoteLeaderError,
     RemoteLeaderService,
@@ -20,14 +21,14 @@ def parse_args() -> argparse.Namespace:
     add_connection_arguments(parser)
     parser.add_argument(
         "--host",
-        default="127.0.0.1",
-        help="WebSocket bind address (use the laptop's private-network address)",
+        default="0.0.0.0",
+        help="WebSocket bind address (default: all laptop network interfaces)",
     )
     parser.add_argument("--port", type=int, default=8765, help="WebSocket port")
     parser.add_argument(
         "--token-file",
-        required=True,
-        help="path to a private shared-token file with mode 600",
+        default=str(DEFAULT_REMOTE_TOKEN_PATH),
+        help=f"private shared-token file (default: {DEFAULT_REMOTE_TOKEN_PATH})",
     )
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
@@ -59,10 +60,11 @@ async def serve_leader(args: argparse.Namespace) -> None:
             ping_interval=10,
             ping_timeout=5,
         ) as server:
-            print(f"Serving read-only U-ARM samples on ws://{args.host}:{args.port}/ws/leader")
+            print(f"Serving read-only U-ARM samples on port {args.port}")
             if leader.torque_enabled_ids:
                 print(f"WARNING: leader torque is enabled on IDs {leader.torque_enabled_ids}")
-            print("Waiting for the follower backend. Press Ctrl-C to stop.")
+            print("Open the follower console on this laptop, then click Connect leader.")
+            print("Press Ctrl-C to stop.")
             await server.serve_forever()
     finally:
         leader.close()

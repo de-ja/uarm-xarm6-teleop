@@ -12,9 +12,11 @@ import numpy as np
 from uarm_xarm6_teleop.config import load_config
 from uarm_xarm6_teleop.remote_leader import (
     REMOTE_LEADER_PATH,
+    BrowserPairedRemoteLeaderFactory,
     RemoteLeader,
     RemoteLeaderError,
     RemoteLeaderService,
+    leader_url_for_host,
     load_token_file,
     normalize_leader_url,
 )
@@ -166,6 +168,26 @@ class RemoteLeaderTests(unittest.TestCase):
         )
         with self.assertRaises(RemoteLeaderError):
             normalize_leader_url("http://leader.example:8765")
+
+    def test_browser_source_addresses_become_leader_urls(self):
+        self.assertEqual(
+            leader_url_for_host("10.42.0.15"),
+            "ws://10.42.0.15:8765/ws/leader",
+        )
+        self.assertEqual(
+            leader_url_for_host("fd00::15", port=9000),
+            "ws://[fd00::15]:9000/ws/leader",
+        )
+
+    def test_browser_paired_factory_requires_pairing_then_uses_observed_address(self):
+        factory = BrowserPairedRemoteLeaderFactory(token=TOKEN)
+        with self.assertRaisesRegex(RemoteLeaderError, "Open the console"):
+            factory(self.config.serial, self.config.leader)
+
+        factory.pair_browser("10.42.0.15")
+        leader = factory(self.config.serial, self.config.leader)
+
+        self.assertEqual(leader.url, "ws://10.42.0.15:8765/ws/leader")
 
 
 class RemoteLeaderServiceTests(unittest.IsolatedAsyncioTestCase):
