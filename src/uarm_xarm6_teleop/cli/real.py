@@ -12,10 +12,12 @@ from ..backends.xarm import TargetSafety, XArm6Hardware, XArmHardwareError, XArm
 from ..config import validate_config
 from ..controller import make_mapping, require_safe_leader_start
 from ..feetech import FeetechError, FeetechLeader
+from ..scheduling import PeriodicScheduler
 from .common import add_connection_arguments, config_from_args
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse dry-run, inspection, and guarded physical-motion options."""
     parser = argparse.ArgumentParser(
         description="Map the Feetech U-ARM to a physical xArm6 (dry-run by default)."
     )
@@ -44,14 +46,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def format_target(action: np.ndarray) -> str:
+    """Format six joint targets and one gripper command for the terminal."""
     joints = "  ".join(
-        f"J{index}={degrees:+7.2f}"
-        for index, degrees in enumerate(np.rad2deg(action[:6]), start=1)
+        f"J{index}={degrees:+7.2f}" for index, degrees in enumerate(np.rad2deg(action[:6]), start=1)
     )
     return f"{joints}  grip={action[6]:.3f}"
 
 
 def print_status(status: XArmStatus) -> None:
+    """Print a read-only xArm and Gripper G2 status snapshot."""
     joints = ", ".join(f"{value:+.2f}" for value in status.joint_degrees)
     print(f"Connected: {status.connected}  SDK/firmware: {status.version}")
     print(
@@ -62,9 +65,7 @@ def print_status(status: XArmStatus) -> None:
     gripper_state = {0: "stopped", 1: "moving", 2: "grasping"}.get(
         status.gripper_status, "unavailable"
     )
-    gripper_force = (
-        "unavailable" if status.gripper_force is None else str(status.gripper_force)
-    )
+    gripper_force = "unavailable" if status.gripper_force is None else str(status.gripper_force)
     print(
         f"xArm Gripper G2: {status.gripper_position} mm, force "
         f"{gripper_force}, state {gripper_state}, "
@@ -73,6 +74,7 @@ def print_status(status: XArmStatus) -> None:
 
 
 def run() -> None:
+    """Run dry-run-first physical teleoperation with explicit arming."""
     args = parse_args()
     config = config_from_args(args)
     physical = replace(
@@ -112,21 +114,16 @@ def run() -> None:
                 status = follower.inspect()
                 if config.xarm6.gripper_mode == "toggle":
                     midpoint = (
-                        physical.gripper_open_position
-                        + physical.gripper_closed_position
+                        physical.gripper_open_position + physical.gripper_closed_position
                     ) / 2.0
-                    gripper_ratio = (
-                        physical.gripper_open_position - status.gripper_position
-                    ) / (
-                        physical.gripper_open_position
-                        - physical.gripper_closed_position
+                    gripper_ratio = (physical.gripper_open_position - status.gripper_position) / (
+                        physical.gripper_open_position - physical.gripper_closed_position
                     )
                     mapping.reset_gripper(
                         float(sample.radians[6]),
                         closed=status.gripper_position < midpoint,
                         command=float(
-                            np.clip(gripper_ratio, 0.0, 1.0)
-                            * config.xarm6.gripper_command_max
+                            np.clip(gripper_ratio, 0.0, 1.0) * config.xarm6.gripper_command_max
                         ),
                     )
                     action = mapping.action(sample.radians)
@@ -149,9 +146,8 @@ def run() -> None:
                 print("DRY RUN: no xArm connection was opened and physical motion is disabled.")
                 print("Add --robot-ip ADDRESS --enable-motion only after completing the checks.")
 
-            period = 1.0 / physical.rate
-            next_step = time.monotonic()
-            next_report = next_step
+            scheduler = PeriodicScheduler(physical.rate)
+            next_report = time.monotonic()
             last_contact_state = False
             while True:
                 sample = leader.read()
@@ -172,18 +168,14 @@ def run() -> None:
                     print()
                     return
 
-                next_step += period
-                delay = next_step - time.monotonic()
-                if delay > 0:
-                    time.sleep(delay)
-                else:
-                    next_step = time.monotonic()
+                scheduler.wait()
     finally:
         if follower is not None:
             follower.close()
 
 
 def main() -> None:
+    """Run the ``uarm-real`` command."""
     try:
         run()
     except KeyboardInterrupt:

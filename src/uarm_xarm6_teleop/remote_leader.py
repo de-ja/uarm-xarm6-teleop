@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from types import TracebackType
 from typing import Any, Protocol, Self
 from urllib.parse import urlsplit, urlunsplit
 
@@ -51,6 +52,17 @@ ConnectFactory = Callable[..., _SyncConnection]
 
 
 def load_token_file(path: str | Path) -> str:
+    """Load and validate a private shared-token file.
+
+    Args:
+        path: Token file that must be accessible only by its owner.
+
+    Returns:
+        The stripped token text.
+
+    Raises:
+        RemoteLeaderError: If the file is missing, exposed, or too short.
+    """
     token_path = Path(path).expanduser()
     try:
         mode = stat.S_IMODE(token_path.stat().st_mode)
@@ -71,6 +83,17 @@ def load_token_file(path: str | Path) -> str:
 
 
 def normalize_leader_url(url: str) -> str:
+    """Validate a remote leader URL and add the standard endpoint when omitted.
+
+    Args:
+        url: WebSocket URL with no embedded credentials or fragment.
+
+    Returns:
+        Normalized ``ws://`` or ``wss://`` URL.
+
+    Raises:
+        RemoteLeaderError: If the URL is malformed or uses an unsupported scheme.
+    """
     parsed = urlsplit(url.strip())
     if parsed.scheme not in ("ws", "wss") or not parsed.hostname:
         raise RemoteLeaderError("Remote leader URL must use ws:// or wss:// and include a host")
@@ -109,7 +132,17 @@ def _positions_to_sample(
 
 
 class RemoteLeader:
-    """Synchronous leader interface backed by a laptop WebSocket service."""
+    """Provide synchronous leader reads through a laptop WebSocket service.
+
+    Args:
+        serial: Expected ordered servo IDs.
+        leader: Calibration used to convert remote raw positions.
+        url: Laptop WebSocket service URL.
+        token: Shared authentication token.
+        timeout: Connect and receive timeout in seconds.
+        monotonic: Clock used to timestamp requested samples.
+        connect_factory: Optional WebSocket connector for tests or alternate transports.
+    """
 
     def __init__(
         self,
@@ -121,7 +154,7 @@ class RemoteLeader:
         timeout: float = 0.5,
         monotonic: Callable[[], float] = time.monotonic,
         connect_factory: ConnectFactory | None = None,
-    ):
+    ) -> None:
         if timeout <= 0:
             raise ValueError("Remote leader timeout must be positive")
         if len(token) < MIN_TOKEN_LENGTH:
@@ -175,6 +208,11 @@ class RemoteLeader:
             raise RemoteLeaderError(f"Remote leader receive failed: {error}") from error
 
     def open(self) -> None:
+        """Open, authenticate, and verify protocol and servo compatibility.
+
+        Raises:
+            RemoteLeaderError: If connection, authentication, or compatibility fails.
+        """
         if self._connection is not None:
             raise RemoteLeaderError("Remote leader is already connected")
         connection = self._connect()
@@ -217,6 +255,14 @@ class RemoteLeader:
             raise
 
     def read(self) -> LeaderSample:
+        """Request, validate, and calibrate exactly one fresh leader sample.
+
+        Returns:
+            Timestamped calibrated leader sample.
+
+        Raises:
+            RemoteLeaderError: If transport or sample validation fails.
+        """
         if self._connection is None:
             raise RemoteLeaderError("Remote leader is not connected")
         self._sequence += 1
@@ -245,6 +291,7 @@ class RemoteLeader:
         return _positions_to_sample(positions, self.leader_config, timestamp=requested_at)
 
     def close(self) -> None:
+        """Close the WebSocket connection and clear reported torque state."""
         connection, self._connection = self._connection, None
         self.torque_enabled_ids = ()
         if connection is not None:
@@ -257,12 +304,29 @@ class RemoteLeader:
         self.open()
         return self
 
-    def __exit__(self, _exc_type, _exc_value, _traceback) -> None:
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc_value: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
         self.close()
 
 
 def leader_url_for_host(host: str, *, port: int = 8765) -> str:
-    """Build a leader URL from an observed browser source address."""
+    """Build a leader URL from an observed browser source address.
+
+    Args:
+        host: IPv4 or IPv6 address observed by the follower HTTP server.
+        port: Laptop leader-service port.
+
+    Returns:
+        WebSocket URL containing the standard leader endpoint.
+
+    Raises:
+        RemoteLeaderError: If ``host`` is not an IP address.
+        ValueError: If ``port`` is outside the TCP port range.
+    """
     try:
         address = ipaddress.ip_address(host.strip())
     except ValueError as error:
@@ -274,9 +338,15 @@ def leader_url_for_host(host: str, *, port: int = 8765) -> str:
 
 
 class BrowserPairedRemoteLeaderFactory:
-    """Create a remote leader using the address observed from the operator browser."""
+    """Create remote leaders using the address observed from the operator browser.
 
-    def __init__(self, *, token: str, port: int = 8765, timeout: float = 0.2):
+    Args:
+        token: Shared authentication token copied to both computers.
+        port: Laptop leader-service port.
+        timeout: Connect and read timeout in seconds.
+    """
+
+    def __init__(self, *, token: str, port: int = 8765, timeout: float = 0.2) -> None:
         if len(token) < MIN_TOKEN_LENGTH:
             raise RemoteLeaderError(
                 f"Remote leader token must contain at least {MIN_TOKEN_LENGTH} characters"
@@ -292,12 +362,25 @@ class BrowserPairedRemoteLeaderFactory:
         self._url: str | None = None
 
     def pair_browser(self, host: str) -> str:
+        """Record the operator browser's source address for the next connection."""
         url = leader_url_for_host(host, port=self.port)
         with self._lock:
             self._url = url
         return url
 
     def __call__(self, serial: SerialConfig, leader: LeaderConfig) -> RemoteLeader:
+        """Create a remote reader for the currently paired laptop.
+
+        Args:
+            serial: Expected servo bus configuration.
+            leader: Leader calibration configuration.
+
+        Returns:
+            An unopened synchronous remote leader.
+
+        Raises:
+            RemoteLeaderError: If no laptop browser has paired yet.
+        """
         with self._lock:
             url = self._url
         if url is None:
@@ -314,9 +397,15 @@ class BrowserPairedRemoteLeaderFactory:
 
 
 class RemoteLeaderService:
-    """Serve one authenticated follower while retaining local serial ownership."""
+    """Serve one authenticated follower while retaining local serial ownership.
 
-    def __init__(self, leader: Any, serial: SerialConfig, *, token: str):
+    Args:
+        leader: Open local Feetech reader owned by the laptop process.
+        serial: Servo IDs the follower must request in the same order.
+        token: Shared authentication token.
+    """
+
+    def __init__(self, leader: Any, serial: SerialConfig, *, token: str) -> None:
         if len(token) < MIN_TOKEN_LENGTH:
             raise RemoteLeaderError(
                 f"Remote leader token must contain at least {MIN_TOKEN_LENGTH} characters"
@@ -333,6 +422,11 @@ class RemoteLeaderService:
         await connection.close(code=code, reason=message[:120])
 
     async def handle(self, connection: _AsyncConnection) -> None:
+        """Authenticate one WebSocket and serve request/response samples.
+
+        Args:
+            connection: Accepted asynchronous WebSocket connection.
+        """
         path = getattr(getattr(connection, "request", None), "path", REMOTE_LEADER_PATH)
         if path.split("?", 1)[0] != REMOTE_LEADER_PATH:
             await self._reject(connection, "Unknown remote leader endpoint")

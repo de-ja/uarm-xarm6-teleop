@@ -365,6 +365,9 @@ export function App() {
           <section className="panel connection-panel">
             <div className="panel-heading"><div><p className="eyebrow">Step 2</p><h2>Follower</h2></div><Power /></div>
             <p className="muted">Inspection is read-only and never enables motion.</p>
+            {!snapshot.capabilities.physical_available && (
+              <p className="inline-warning">Physical xArm support is not installed.</p>
+            )}
             <label className="field-label" htmlFor="robot-ip">xArm controller IP</label>
             <input
               id="robot-ip"
@@ -405,7 +408,9 @@ export function App() {
               <Box size={16} /> Start simulation
             </button>
             <p className="muted simulation-hint">
-              Opens the ManiSkill viewer on the computer running this backend.
+              {snapshot.capabilities.simulation_available
+                ? "Opens the ManiSkill viewer on the computer running this backend."
+                : "ManiSkill simulation is not installed on this backend."}
             </p>
             <button
               className="button danger-outline full"
@@ -497,6 +502,8 @@ export function App() {
             <section className="panel">
               <div className="section-title compact"><h2>Runtime</h2><Activity size={18} /></div>
               <Metric label="Control mode" value={snapshot.mode?.replace("_", " ") ?? "disabled"} />
+              <Metric label="Leader transport" value={snapshot.capabilities.leader_transport.replaceAll("_", " ")} />
+              <Metric label="Session" value={snapshot.session_id.slice(0, 12)} />
               <Metric label="Loop rate" value={`${snapshot.loop_rate_hz.toFixed(1)} Hz`} good={!active || snapshot.loop_rate_hz > 15} />
               <Metric
                 label="Leader to xArm"

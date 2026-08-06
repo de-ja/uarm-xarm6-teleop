@@ -208,6 +208,9 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# Local structured controller session logs.
+*.jsonl
+
 # Node/Vite development output (the packaged web/dist bundle is committed).
 frontend/node_modules/
 frontend/*.tsbuildinfo

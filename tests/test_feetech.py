@@ -40,9 +40,7 @@ class FeetechLeaderTests(unittest.TestCase):
 
         sample = leader.read()
 
-        self.assertAlmostEqual(
-            sample.degrees[6], config.xarm6.gripper_travel_degrees
-        )
+        self.assertAlmostEqual(sample.degrees[6], config.xarm6.gripper_travel_degrees)
 
 
 if __name__ == "__main__":

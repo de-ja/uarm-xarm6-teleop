@@ -8,7 +8,7 @@ export class ApiError extends Error {
 
 async function request(path: string, body?: unknown): Promise<TeleopSnapshot> {
   const response = await fetch(path, {
-    method: body === undefined ? "POST" : "POST",
+    method: "POST",
     headers: body === undefined ? undefined : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });

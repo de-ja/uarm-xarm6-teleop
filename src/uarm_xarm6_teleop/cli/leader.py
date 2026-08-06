@@ -17,6 +17,7 @@ from .common import add_connection_arguments, config_from_args
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse laptop leader-service options."""
     parser = argparse.ArgumentParser(description="Serve this computer's U-ARM to uarm-web.")
     add_connection_arguments(parser)
     parser.add_argument(
@@ -37,6 +38,15 @@ def parse_args() -> argparse.Namespace:
 
 
 async def serve_leader(args: argparse.Namespace) -> None:
+    """Own the local U-ARM and serve authenticated samples until shutdown.
+
+    Args:
+        args: Parsed connection, bind, port, and token options.
+
+    Raises:
+        RemoteLeaderError: If remote support or token validation is unavailable.
+        FeetechError: If the local leader cannot be opened.
+    """
     try:
         from websockets.asyncio.server import serve
     except ImportError as error:  # pragma: no cover - optional host dependency
@@ -71,6 +81,7 @@ async def serve_leader(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    """Run the ``uarm-leader`` command."""
     args = parse_args()
     try:
         asyncio.run(serve_leader(args))

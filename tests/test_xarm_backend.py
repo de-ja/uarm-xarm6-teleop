@@ -156,9 +156,7 @@ class XArmBackendTests(unittest.TestCase):
         servo_call = next(call for call in fake.calls if call[0] == "set_servo_angle")
         self.assertFalse(servo_call[1]["wait"])
         self.assertTrue(servo_call[1]["is_radian"])
-        gripper_call = next(
-            call for call in fake.calls if call[0] == "set_gripper_g2_position"
-        )
+        gripper_call = next(call for call in fake.calls if call[0] == "set_gripper_g2_position")
         self.assertEqual(gripper_call[1], 82)
         self.assertEqual(gripper_call[2]["speed"], 50)
         self.assertEqual(gripper_call[2]["force"], 20)
@@ -191,19 +189,11 @@ class XArmBackendTests(unittest.TestCase):
         self.assertTrue(backend.gripper_contact_latched)
         self.assertEqual(fake.gripper, 60)
 
-        gripper_calls = len(
-            [call for call in fake.calls if call[0] == "set_gripper_g2_position"]
-        )
+        gripper_calls = len([call for call in fake.calls if call[0] == "set_gripper_g2_position"])
         fake.gripper_status = 0
         backend.command(closed, gripper_command_max=0.81)
         self.assertEqual(
-            len(
-                [
-                    call
-                    for call in fake.calls
-                    if call[0] == "set_gripper_g2_position"
-                ]
-            ),
+            len([call for call in fake.calls if call[0] == "set_gripper_g2_position"]),
             gripper_calls,
         )
 

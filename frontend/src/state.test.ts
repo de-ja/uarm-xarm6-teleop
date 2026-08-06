@@ -4,7 +4,17 @@ import type { TeleopSnapshot } from "./types";
 
 function snapshot(overrides: Partial<TeleopSnapshot>): TeleopSnapshot {
   return {
-    protocol_version: 1,
+    protocol_version: 3,
+    session_id: "test-session",
+    capabilities: {
+      leader_transport: "local",
+      simulation_available: true,
+      physical_available: true,
+      camera_streaming: true,
+      structured_logging: false,
+      video_transport: "mjpeg",
+      max_robots: 1,
+    },
     timestamp: 0,
     state: "idle",
     mode: null,
@@ -61,5 +71,24 @@ describe("operator capabilities", () => {
     expect(running.canStartSimulation).toBe(false);
     expect(running.canStartPhysical).toBe(false);
     expect(running.canStop).toBe(true);
+  });
+
+  it("honors backend installation capabilities", () => {
+    const unavailable = getCapabilities(
+      snapshot({
+        state: "leader_ready",
+        leader_connected: true,
+        capabilities: {
+          ...snapshot({}).capabilities,
+          simulation_available: false,
+          physical_available: false,
+        },
+      }),
+    );
+
+    expect(unavailable.canInspect).toBe(false);
+    expect(unavailable.canStartSimulation).toBe(false);
+    expect(unavailable.canStartPhysical).toBe(false);
+    expect(unavailable.canStartDryRun).toBe(true);
   });
 });

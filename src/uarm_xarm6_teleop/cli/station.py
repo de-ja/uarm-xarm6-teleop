@@ -22,6 +22,8 @@ OutputFunction = Callable[[str], None]
 
 @dataclass(frozen=True)
 class NetworkAddress:
+    """Pair an active network interface name with its IPv4 address."""
+
     interface: str
     address: str
 
@@ -46,6 +48,7 @@ def _parse_network_addresses(raw: str) -> tuple[NetworkAddress, ...]:
 
 
 def discover_network_addresses() -> tuple[NetworkAddress, ...]:
+    """Discover active non-loopback IPv4 addresses using ``iproute2``."""
     try:
         result = subprocess.run(
             ["ip", "-j", "-4", "address", "show", "up"],
@@ -59,6 +62,7 @@ def discover_network_addresses() -> tuple[NetworkAddress, ...]:
 
 
 def console_urls(port: int, addresses: tuple[NetworkAddress, ...]) -> tuple[str, ...]:
+    """Build laptop-accessible console URLs for the desktop addresses."""
     return tuple(f"http://{item.address}:{port}" for item in addresses)
 
 
@@ -69,6 +73,17 @@ def diagnose_station(
     port: int,
     output: OutputFunction = print,
 ) -> bool:
+    """Check token, configuration, and local network visibility.
+
+    Args:
+        config_path: Optional desktop configuration overlay.
+        token_path: Shared leader-token path.
+        port: Desktop HTTP console port.
+        output: Function used to display diagnostic messages.
+
+    Returns:
+        Whether all required local files were valid.
+    """
     output("")
     output("FOLLOWER STATION DIAGNOSTICS")
     try:
@@ -97,9 +112,22 @@ def interactive_station(
     host: str = "0.0.0.0",
     port: int = 8000,
     leader_port: int = 8765,
+    event_log_path: str | Path | None = None,
     input_fn: InputFunction = input,
     output: OutputFunction = print,
 ) -> None:
+    """Display the follower TUI and launch browser-paired web operation.
+
+    Args:
+        config_path: Optional desktop configuration overlay.
+        token_path: Shared leader-token path.
+        host: HTTP bind address.
+        port: HTTP console port.
+        leader_port: Laptop WebSocket service port.
+        event_log_path: Optional JSON Lines destination for session events.
+        input_fn: Interactive input function, replaceable in tests.
+        output: Interactive output function, replaceable in tests.
+    """
     output("")
     output("U-ARM FOLLOWER STATION")
     output("  Leader pairing: automatic from the laptop browser")
@@ -137,17 +165,20 @@ def interactive_station(
         leader_timeout=0.2,
         browser_pair_leader=True,
         leader_port=leader_port,
+        event_log_path=event_log_path,
         open_browser=False,
     )
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse follower-station options and locate the default desktop overlay."""
     parser = argparse.ArgumentParser(description="Interactive xArm follower-station launcher.")
     parser.add_argument("--config", help="desktop TOML configuration file")
     parser.add_argument("--token-file", default=str(DEFAULT_TOKEN_PATH), help="shared token file")
     parser.add_argument("--host", default="0.0.0.0", help="HTTP bind address")
     parser.add_argument("--port", type=int, default=8000, help="HTTP port")
     parser.add_argument("--leader-port", type=int, default=8765, help="laptop leader-service port")
+    parser.add_argument("--event-log", help="optional JSON Lines controller event log")
     parser.add_argument("--diagnose", action="store_true", help="check local station setup")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
@@ -160,6 +191,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Run the ``uarm-station`` command."""
     args = parse_args()
     try:
         if args.diagnose:
@@ -175,6 +207,7 @@ def main() -> None:
             host=args.host,
             port=args.port,
             leader_port=args.leader_port,
+            event_log_path=args.event_log,
         )
     except KeyboardInterrupt:
         print("\nFollower station stopped.")

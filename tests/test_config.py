@@ -46,11 +46,7 @@ class ConfigTests(unittest.TestCase):
     def test_invalid_toggle_hysteresis_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.toml"
-            path.write_text(
-                "[xarm6]\n"
-                "gripper_press_degrees = 4\n"
-                "gripper_release_degrees = 4\n"
-            )
+            path.write_text("[xarm6]\ngripper_press_degrees = 4\ngripper_release_degrees = 4\n")
             with self.assertRaisesRegex(ValueError, "must exceed"):
                 load_config(path)
 

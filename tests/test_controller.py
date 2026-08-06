@@ -109,6 +109,18 @@ class FakeSimulator:
         self.closed = True
 
 
+class FakeEventSink:
+    def __init__(self):
+        self.records = []
+        self.closed = False
+
+    def emit(self, session_id, event):
+        self.records.append((session_id, event))
+
+    def close(self):
+        self.closed = True
+
+
 class ControllerTests(unittest.TestCase):
     def setUp(self):
         self.config = load_config()
@@ -116,7 +128,14 @@ class ControllerTests(unittest.TestCase):
         self.followers = []
         self.simulators = []
 
-    def make_controller(self, *, torque_ids=(), fail_event=None, step_radians=0.0):
+    def make_controller(
+        self,
+        *,
+        torque_ids=(),
+        fail_event=None,
+        step_radians=0.0,
+        event_sink=None,
+    ):
         def leader_factory(serial, leader):
             fake = FakeLeader(
                 serial,
@@ -143,6 +162,8 @@ class ControllerTests(unittest.TestCase):
             leader_factory=leader_factory,
             follower_factory=follower_factory,
             simulation_factory=simulation_factory,
+            event_sink=event_sink,
+            session_id="test-session",
         )
 
     @staticmethod
@@ -180,6 +201,17 @@ class ControllerTests(unittest.TestCase):
         self.assertLess(current.last_sample_age_ms, 100.0)
         self.assertEqual(self.followers, [])
         controller.disconnect()
+
+    def test_controller_events_use_one_session_and_close_the_sink(self):
+        sink = FakeEventSink()
+        controller = self.make_controller(event_sink=sink)
+
+        controller.connect_leader()
+        controller.close()
+
+        self.assertGreaterEqual(len(sink.records), 3)
+        self.assertEqual({session_id for session_id, _event in sink.records}, {"test-session"})
+        self.assertTrue(sink.closed)
 
     def test_dry_run_lifecycle_never_opens_robot(self):
         controller = self.make_controller()

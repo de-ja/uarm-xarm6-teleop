@@ -21,6 +21,19 @@ def positions_to_radians(
     midpoint: int,
     directions: tuple[int, ...] | list[int],
 ) -> np.ndarray:
+    """Convert raw single-turn servo positions into signed joint radians.
+
+    Args:
+        positions: Raw servo positions in the configured ID order.
+        midpoint: Raw position representing zero radians.
+        directions: Per-servo sign used to align mechanical joint directions.
+
+    Returns:
+        A floating-point vector of joint angles in radians.
+
+    Raises:
+        ValueError: If positions and directions have different lengths.
+    """
     if len(positions) != len(directions):
         raise ValueError("positions and directions must have the same length")
     deltas = np.asarray([signed_delta(value, midpoint) for value in positions], dtype=float)
@@ -56,19 +69,13 @@ class XArm6Mapping:
         if command is None:
             self._gripper_command = self.gripper_command_max if closed else 0.0
         else:
-            self._gripper_command = float(
-                np.clip(command, 0.0, self.gripper_command_max)
-            )
-        self._trigger_armed = (
-            np.rad2deg(trigger_radians) <= self.gripper_release_degrees
-        )
+            self._gripper_command = float(np.clip(command, 0.0, self.gripper_command_max))
+        self._trigger_armed = np.rad2deg(trigger_radians) <= self.gripper_release_degrees
 
     def _gripper_action(self, trigger_radians: float) -> float:
         trigger_degrees = float(np.rad2deg(trigger_radians))
         if self.gripper_mode == "proportional":
-            ratio = np.clip(
-                trigger_degrees / self.gripper_travel_degrees, 0.0, 1.0
-            )
+            ratio = np.clip(trigger_degrees / self.gripper_travel_degrees, 0.0, 1.0)
             return float(ratio * self.gripper_command_max)
         if self.gripper_mode != "toggle":
             raise ValueError(f"Unsupported gripper mode: {self.gripper_mode}")
@@ -76,15 +83,24 @@ class XArm6Mapping:
         if self._trigger_armed:
             if trigger_degrees >= self.gripper_press_degrees:
                 self._gripper_closed = not self._gripper_closed
-                self._gripper_command = (
-                    self.gripper_command_max if self._gripper_closed else 0.0
-                )
+                self._gripper_command = self.gripper_command_max if self._gripper_closed else 0.0
                 self._trigger_armed = False
         elif trigger_degrees <= self.gripper_release_degrees:
             self._trigger_armed = True
         return self._gripper_command
 
     def action(self, leader_radians: np.ndarray) -> np.ndarray:
+        """Map a seven-axis leader sample to six joints and one gripper command.
+
+        Args:
+            leader_radians: Six leader joint angles followed by the trigger angle.
+
+        Returns:
+            Seven values containing six xArm targets in radians and a gripper command.
+
+        Raises:
+            ValueError: If the leader sample does not contain exactly seven values.
+        """
         if leader_radians.shape != (7,):
             raise ValueError("leader_radians must contain exactly seven values")
 

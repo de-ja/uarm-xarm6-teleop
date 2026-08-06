@@ -26,6 +26,8 @@ class CameraError(RuntimeError):
 
 @dataclass(frozen=True)
 class CameraCapability:
+    """Describe the identity and capture support reported by a V4L2 node."""
+
     name: str
     bus_info: str
     can_capture: bool
@@ -33,11 +35,14 @@ class CameraCapability:
 
 @dataclass(frozen=True)
 class CameraInfo:
+    """Describe one stable browser-selectable camera source."""
+
     id: str
     name: str
     device: str
 
     def to_dict(self) -> dict[str, str]:
+        """Serialize the camera for the HTTP API."""
         return {"id": self.id, "name": self.name, "device": self.device}
 
 
@@ -67,13 +72,18 @@ def query_camera_capability(device: Path) -> CameraCapability:
 
 
 class CameraCatalog:
-    """Discover one browser-facing RGB source per physical V4L2 camera."""
+    """Discover one browser-facing RGB source per physical V4L2 camera.
+
+    Args:
+        dev_root: Device-tree root containing V4L2 nodes and stable links.
+        capability_reader: Read-only function used to query a device node.
+    """
 
     def __init__(
         self,
         dev_root: Path = Path("/dev"),
         capability_reader: Callable[[Path], CameraCapability] = query_camera_capability,
-    ):
+    ) -> None:
         self.dev_root = dev_root
         self.capability_reader = capability_reader
 
@@ -94,6 +104,7 @@ class CameraCatalog:
         return discovered
 
     def list_cameras(self) -> tuple[CameraInfo, ...]:
+        """Return deduplicated capture devices, preferring stable symlinks."""
         capabilities = self._capabilities()
         if not capabilities:
             return ()
@@ -146,29 +157,52 @@ class CameraCatalog:
         return tuple(cameras)
 
     def get(self, camera_id: str) -> CameraInfo:
+        """Resolve a current camera ID.
+
+        Args:
+            camera_id: Stable identifier returned by :meth:`list_cameras`.
+
+        Returns:
+            The currently available camera description.
+
+        Raises:
+            CameraError: If the device has disappeared or its ID is unknown.
+        """
         for camera in self.list_cameras():
             if camera.id == camera_id:
                 return camera
         raise CameraError("Camera is no longer available; refresh the camera list")
 
 
-class VideoCapture(Protocol):
+class _VideoCapture(Protocol):
     def isOpened(self) -> bool: ...
 
-    def read(self): ...
+    def read(self) -> tuple[bool, object]: ...
 
     def release(self) -> None: ...
 
 
 @dataclass(frozen=True)
 class CameraFrame:
+    """Store an encoded frame and the metadata used for latency measurement."""
+
     jpeg: bytes
     captured_at: float
     jpeg_quality: int
 
 
 class AdaptiveJpegQuality:
-    """Favor delivery latency while cautiously recovering image quality."""
+    """Favor delivery latency while cautiously recovering image quality.
+
+    Args:
+        initial: Initial JPEG quality from 1 through 100.
+        minimum: Lowest permitted adaptive quality.
+        maximum: Highest permitted adaptive quality.
+        target_latency_ms: Desired capture-to-browser latency.
+
+    Raises:
+        ValueError: If quality bounds or the latency target are invalid.
+    """
 
     def __init__(
         self,
@@ -176,7 +210,7 @@ class AdaptiveJpegQuality:
         minimum: int = 35,
         maximum: int = 85,
         target_latency_ms: float = 75.0,
-    ):
+    ) -> None:
         if not 1 <= minimum <= initial <= maximum <= 100:
             raise ValueError("JPEG quality must satisfy 1 <= minimum <= initial <= maximum <= 100")
         if target_latency_ms <= 0:
@@ -190,10 +224,22 @@ class AdaptiveJpegQuality:
 
     @property
     def quality(self) -> int:
+        """Return the current thread-safe JPEG quality."""
         with self._lock:
             return self._quality
 
     def observe(self, latency_ms: float) -> int:
+        """Update quality from one browser latency report.
+
+        Args:
+            latency_ms: Measured capture-to-browser latency in milliseconds.
+
+        Returns:
+            The new JPEG quality.
+
+        Raises:
+            ValueError: If latency is negative or non-finite.
+        """
         if not math.isfinite(latency_ms) or latency_ms < 0:
             raise ValueError("Camera latency must be a finite, non-negative value")
 
@@ -220,10 +266,10 @@ class _CameraSession:
         height: int,
         fps: int,
         quality: AdaptiveJpegQuality,
-        capture_factory: Callable[[str], VideoCapture],
+        capture_factory: Callable[[str], _VideoCapture],
         frame_encoder: Callable[[object, int], bytes],
         wall_time: Callable[[], float],
-    ):
+    ) -> None:
         self.camera = camera
         self.width = width
         self.height = height
@@ -248,7 +294,7 @@ class _CameraSession:
         self.thread.start()
 
     def _capture(self) -> None:
-        capture: VideoCapture | None = None
+        capture: _VideoCapture | None = None
         try:
             capture = self.capture_factory(self.camera.device)
             if not capture.isOpened():
@@ -292,9 +338,9 @@ class _CameraSession:
     def wait_for_frame(self, sequence: int) -> tuple[int, CameraFrame] | None:
         with self.condition:
             self.condition.wait_for(
-                lambda: self.sequence != sequence
-                or self.error is not None
-                or self.stop_event.is_set(),
+                lambda: (
+                    self.sequence != sequence or self.error is not None or self.stop_event.is_set()
+                ),
                 timeout=5.0,
             )
             if self.sequence != sequence and self.frame is not None:
@@ -312,12 +358,15 @@ class _CameraSession:
 
 
 class CameraSubscription:
-    def __init__(self, manager: CameraManager, session: _CameraSession):
+    """Stream frames from one shared camera session for one HTTP subscriber."""
+
+    def __init__(self, manager: CameraManager, session: _CameraSession) -> None:
         self.manager = manager
         self.session = session
         self.closed = False
 
     def iter_mjpeg(self) -> Iterator[bytes]:
+        """Yield multipart JPEG records until the session or subscriber closes."""
         sequence = -1
         try:
             while not self.closed:
@@ -338,12 +387,29 @@ class CameraSubscription:
             self.close()
 
     def close(self) -> None:
+        """Release this subscriber and stop an otherwise unused capture session."""
         if not self.closed:
             self.closed = True
             self.manager._unsubscribe(self.session)
 
 
 class CameraManager:
+    """Own shared camera capture sessions and adaptive stream quality.
+
+    Args:
+        catalog: Camera discovery service.
+        width: Requested capture width in pixels.
+        height: Requested capture height in pixels.
+        fps: Requested capture frame rate.
+        jpeg_quality: Initial JPEG quality.
+        min_jpeg_quality: Minimum adaptive JPEG quality.
+        max_jpeg_quality: Maximum adaptive JPEG quality.
+        target_latency_ms: Desired capture-to-browser latency.
+        capture_factory: Optional capture factory used for testing or alternate sources.
+        frame_encoder: Optional JPEG encoder.
+        wall_time: Clock used to timestamp frames for browser latency measurement.
+    """
+
     def __init__(
         self,
         catalog: CameraCatalog | None = None,
@@ -355,10 +421,10 @@ class CameraManager:
         min_jpeg_quality: int = 35,
         max_jpeg_quality: int = 85,
         target_latency_ms: float = 75.0,
-        capture_factory: Callable[[str], VideoCapture] | None = None,
+        capture_factory: Callable[[str], _VideoCapture] | None = None,
         frame_encoder: Callable[[object, int], bytes] | None = None,
         wall_time: Callable[[], float] = time.time,
-    ):
+    ) -> None:
         self.catalog = catalog or CameraCatalog()
         self.width = width
         self.height = height
@@ -373,7 +439,7 @@ class CameraManager:
         self.lock = threading.Lock()
         self.sessions: dict[str, _CameraSession] = {}
 
-    def _open_capture(self, device: str) -> VideoCapture:
+    def _open_capture(self, device: str) -> _VideoCapture:
         try:
             import cv2
         except ImportError as error:
@@ -397,9 +463,21 @@ class CameraManager:
         return encoded.tobytes()
 
     def list_cameras(self) -> tuple[CameraInfo, ...]:
+        """Return the cameras currently offered to the operator console."""
         return self.catalog.list_cameras()
 
     def subscribe(self, camera_id: str) -> CameraSubscription:
+        """Subscribe to a shared camera capture session.
+
+        Args:
+            camera_id: ID returned by :meth:`list_cameras`.
+
+        Returns:
+            A stream subscription that must eventually be closed.
+
+        Raises:
+            CameraError: If the camera disappears, cannot open, or produces no frame.
+        """
         with self.lock:
             session = self.sessions.get(camera_id)
             if session is None:
@@ -432,6 +510,7 @@ class CameraManager:
         return CameraSubscription(self, session)
 
     def report_latency(self, camera_id: str, latency_ms: float) -> int:
+        """Apply browser latency feedback and return the resulting JPEG quality."""
         with self.lock:
             session = self.sessions.get(camera_id)
         if session is None:
@@ -449,6 +528,7 @@ class CameraManager:
             session.stop()
 
     def close(self) -> None:
+        """Stop and remove every active camera capture session."""
         with self.lock:
             sessions = list(self.sessions.values())
             self.sessions.clear()

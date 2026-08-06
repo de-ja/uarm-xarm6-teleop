@@ -6,12 +6,15 @@ import argparse
 import time
 
 from ..backends.maniskill import ManiSkillXArm6
-from ..feetech import FeetechError, FeetechLeader
+from ..config import TeleopConfig
+from ..feetech import FeetechError, FeetechLeader, LeaderSample
 from ..mapping import XArm6Mapping
+from ..scheduling import PeriodicScheduler
 from .common import add_connection_arguments, config_from_args
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse visible simulation and leader-check options."""
     parser = argparse.ArgumentParser(
         description="Control a visible ManiSkill xArm6 from the Feetech U-ARM."
     )
@@ -29,14 +32,15 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def format_angles(config, sample) -> str:
+def format_angles(config: TeleopConfig, sample: LeaderSample) -> str:
+    """Format calibrated leader angles for terminal monitoring."""
     return "  ".join(
-        f"{label}={degrees:+.1f}"
-        for label, degrees in zip(config.leader.labels, sample.degrees)
+        f"{label}={degrees:+.1f}" for label, degrees in zip(config.leader.labels, sample.degrees)
     )
 
 
 def run() -> None:
+    """Drive a visible ManiSkill follower from the local U-ARM."""
     args = parse_args()
     config = config_from_args(args)
     rate = args.rate or config.simulation.rate
@@ -61,9 +65,8 @@ def run() -> None:
             return
 
         print(f"Opening xarm6_robotiq in {scene}. Press Ctrl-C to stop.")
-        period = 1.0 / rate
-        next_step = time.monotonic()
-        next_report = next_step
+        scheduler = PeriodicScheduler(rate)
+        next_report = time.monotonic()
 
         with ManiSkillXArm6(scene) as follower:
             while True:
@@ -75,15 +78,11 @@ def run() -> None:
                     print("\r" + format_angles(config, sample) + "  ", end="", flush=True)
                     next_report = now + 0.25
 
-                next_step += period
-                delay = next_step - time.monotonic()
-                if delay > 0:
-                    time.sleep(delay)
-                else:
-                    next_step = time.monotonic()
+                scheduler.wait()
 
 
 def main() -> None:
+    """Run the ``uarm-sim`` command."""
     try:
         run()
     except KeyboardInterrupt:

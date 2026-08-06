@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from types import TracebackType
+from typing import Protocol, Self
 
 import numpy as np
 
@@ -26,6 +28,8 @@ class _XArmAPI(Protocol):
 
 @dataclass(frozen=True)
 class XArmStatus:
+    """Capture a read-only snapshot of xArm and Gripper G2 state."""
+
     connected: bool
     version: str
     mode: int
@@ -42,16 +46,30 @@ class XArmStatus:
 class TargetSafety:
     """Validate mapped targets independently of the physical SDK."""
 
-    def __init__(self, config: PhysicalXArmConfig):
+    def __init__(self, config: PhysicalXArmConfig) -> None:
         self.config = config
         self._previous: np.ndarray | None = None
 
     def reset(self, target_radians: np.ndarray | None = None) -> None:
+        """Clear jump history and optionally validate a new baseline target.
+
+        Args:
+            target_radians: Optional six-joint baseline that bypasses the jump check.
+        """
         self._previous = None
         if target_radians is not None:
             self.validate(target_radians, check_jump=False)
 
     def validate(self, target_radians: np.ndarray, *, check_jump: bool = True) -> None:
+        """Validate target shape, finiteness, static limits, and sample jump.
+
+        Args:
+            target_radians: Six xArm joint targets in radians.
+            check_jump: Whether to compare the target with the previous sample.
+
+        Raises:
+            XArmHardwareError: If the target violates any configured safety constraint.
+        """
         target = np.asarray(target_radians, dtype=float)
         if target.shape != (6,):
             raise XArmHardwareError("xArm target must contain exactly six joints")
@@ -87,7 +105,7 @@ class XArm6Hardware:
         self,
         config: PhysicalXArmConfig,
         api_factory: Callable[..., _XArmAPI] | None = None,
-    ):
+    ) -> None:
         if not config.robot_ip:
             raise XArmHardwareError("No xArm IP configured; pass --robot-ip")
         if api_factory is None:
@@ -160,9 +178,7 @@ class XArm6Hardware:
                 joint_degrees=tuple(float(value) for value in np.rad2deg(joints)),
                 gripper_position=int(gripper),
                 gripper_force=gripper_force,
-                gripper_status=(
-                    None if gripper_status is None else int(gripper_status) & 0x03
-                ),
+                gripper_status=(None if gripper_status is None else int(gripper_status) & 0x03),
                 gripper_error_code=int(gripper_error),
             )
 
@@ -217,6 +233,15 @@ class XArm6Hardware:
         return status
 
     def command(self, action: np.ndarray, gripper_command_max: float) -> None:
+        """Send one validated nonblocking joint and gripper command.
+
+        Args:
+            action: Six joint targets in radians followed by a gripper command.
+            gripper_command_max: Mapping value that represents a fully closed gripper.
+
+        Raises:
+            XArmHardwareError: If motion is not armed or any safety/SDK check fails.
+        """
         values = np.asarray(action, dtype=float)
         if values.shape != (7,) or not np.all(np.isfinite(values)):
             raise XArmHardwareError("Physical action must contain seven finite values")
@@ -254,11 +279,7 @@ class XArm6Hardware:
             ratio = float(np.clip(values[6] / gripper_command_max, 0.0, 1.0))
             desired_gripper = round(
                 self.config.gripper_open_position
-                + ratio
-                * (
-                    self.config.gripper_closed_position
-                    - self.config.gripper_open_position
-                )
+                + ratio * (self.config.gripper_closed_position - self.config.gripper_open_position)
             )
             assert self._last_gripper_position is not None
             gripper_delta = int(
@@ -288,11 +309,7 @@ class XArm6Hardware:
                     self._gripper_contact_latched = False
                 else:
                     send_gripper_target = self._last_gripper_position
-            elif (
-                gripper_status is not None
-                and int(gripper_status) & 0x03 == 2
-                and not opening
-            ):
+            elif gripper_status is not None and int(gripper_status) & 0x03 == 2 and not opening:
                 self._freeze_gripper()
                 self._gripper_contact_latched = True
                 send_gripper_target = self._last_gripper_position
@@ -322,6 +339,7 @@ class XArm6Hardware:
 
     @property
     def gripper_contact_latched(self) -> bool:
+        """Report whether detected contact is preventing further gripper closing."""
         with self._lock:
             return self._gripper_contact_latched
 
@@ -358,8 +376,7 @@ class XArm6Hardware:
             with self._lock:
                 expired = (
                     self._armed
-                    and time.monotonic() - self._last_command_time
-                    > self.config.watchdog_timeout
+                    and time.monotonic() - self._last_command_time > self.config.watchdog_timeout
                 )
                 if expired:
                     self.arm.set_state(4)
@@ -375,6 +392,7 @@ class XArm6Hardware:
                 pass
 
     def safe_stop(self) -> None:
+        """Stop the watchdog and request xArm state 4 when motion is armed."""
         self._watchdog_stop.set()
         thread = self._watchdog_thread
         if thread is not None and thread is not threading.current_thread():
@@ -385,12 +403,18 @@ class XArm6Hardware:
             self._armed = False
 
     def close(self) -> None:
+        """Request a safe stop and disconnect the SDK client."""
         self.safe_stop()
         if bool(getattr(self.arm, "connected", False)):
             self.arm.disconnect()
 
-    def __enter__(self) -> "XArm6Hardware":
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, _exc_type, _exc_value, _traceback) -> None:
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc_value: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
         self.close()

@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+from types import TracebackType
+from typing import Self
+
 import numpy as np
 
 
 class ManiSkillXArm6:
-    def __init__(self, scene: str):
+    """Render and command a visible xArm6 follower in a ManiSkill scene.
+
+    Args:
+        scene: Registered Gymnasium environment name to create.
+
+    Raises:
+        RuntimeError: If the optional simulation dependencies are unavailable.
+    """
+
+    def __init__(self, scene: str) -> None:
         try:
             import gymnasium as gym
             import mani_skill.envs  # noqa: F401
@@ -37,15 +49,22 @@ class ManiSkillXArm6:
             viewer.set_camera_pose(sapien.Pose(raw_pose[:3], raw_pose[3:]))
 
     def step(self, action: np.ndarray) -> None:
+        """Apply one bounded joint-position action and render the resulting frame."""
         bounded = np.clip(action, self.env.action_space.low, self.env.action_space.high)
         self.env.step(bounded)
         self.env.render()
 
     def close(self) -> None:
+        """Close the simulator and its viewer."""
         self.env.close()
 
-    def __enter__(self) -> "ManiSkillXArm6":
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, _exc_type, _exc_value, _traceback) -> None:
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc_value: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
         self.close()

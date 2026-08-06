@@ -8,8 +8,10 @@ import webbrowser
 from functools import partial
 from pathlib import Path
 
+from ..capabilities import detect_runtime_capabilities
 from ..config import load_config
 from ..controller import TeleopController
+from ..event_log import AsyncJsonlEventSink
 from ..remote_leader import (
     BrowserPairedRemoteLeaderFactory,
     RemoteLeader,
@@ -19,6 +21,7 @@ from ..remote_leader import (
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse local, explicit-remote, or browser-paired web options."""
     parser = argparse.ArgumentParser(description="Launch the U-ARM operator console.")
     parser.add_argument("--config", help="path to a TOML configuration file")
     parser.add_argument("--host", default="127.0.0.1", help="HTTP bind address")
@@ -53,6 +56,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="do not open the operator console in the default browser",
     )
+    parser.add_argument(
+        "--event-log",
+        help="optional JSON Lines file for structured controller session events",
+    )
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
@@ -79,8 +86,26 @@ def run_web(
     leader_timeout: float = 0.2,
     browser_pair_leader: bool = False,
     leader_port: int = 8765,
+    event_log_path: str | Path | None = None,
     open_browser: bool = True,
 ) -> None:
+    """Construct the controller and serve the packaged operator console.
+
+    Args:
+        config_path: Optional machine-local configuration overlay.
+        host: HTTP bind address.
+        port: HTTP port.
+        leader_url: Explicit laptop service URL for the legacy remote workflow.
+        leader_token_file: Shared token required by either remote workflow.
+        leader_timeout: Remote connect and sample timeout in seconds.
+        browser_pair_leader: Derive the leader host from the operator HTTP request.
+        leader_port: Laptop leader-service port used for browser pairing.
+        event_log_path: Optional JSON Lines destination for session events.
+        open_browser: Whether to open a local browser after startup.
+
+    Raises:
+        SystemExit: If dependencies, configuration, or remote options are invalid.
+    """
     try:
         import uvicorn
 
@@ -89,9 +114,13 @@ def run_web(
         raise SystemExit(
             "The web dependencies are missing. Install with `pip install -e '.[web]'`."
         ) from error
+    event_sink = None
     try:
         config = load_config(config_path)
+        if event_log_path is not None:
+            event_sink = AsyncJsonlEventSink(event_log_path)
         browser_leader_factory = None
+        leader_transport = "local"
         if browser_pair_leader:
             if leader_url is not None:
                 raise RemoteLeaderError("Browser pairing cannot be combined with a leader URL")
@@ -102,7 +131,16 @@ def run_web(
                 port=leader_port,
                 timeout=leader_timeout,
             )
-            controller = TeleopController(config, leader_factory=browser_leader_factory)
+            leader_transport = "remote_browser_pairing"
+            controller = TeleopController(
+                config,
+                leader_factory=browser_leader_factory,
+                capabilities=detect_runtime_capabilities(
+                    leader_transport=leader_transport,
+                    structured_logging=event_sink is not None,
+                ),
+                event_sink=event_sink,
+            )
         elif leader_url:
             if leader_token_file is None:
                 raise RemoteLeaderError("A leader token file is required for a remote leader")
@@ -113,10 +151,28 @@ def run_web(
                 token=token,
                 timeout=leader_timeout,
             )
-            controller = TeleopController(config, leader_factory=leader_factory)
+            leader_transport = "remote_explicit"
+            controller = TeleopController(
+                config,
+                leader_factory=leader_factory,
+                capabilities=detect_runtime_capabilities(
+                    leader_transport=leader_transport,
+                    structured_logging=event_sink is not None,
+                ),
+                event_sink=event_sink,
+            )
         else:
-            controller = TeleopController(config)
+            controller = TeleopController(
+                config,
+                capabilities=detect_runtime_capabilities(
+                    leader_transport=leader_transport,
+                    structured_logging=event_sink is not None,
+                ),
+                event_sink=event_sink,
+            )
     except (OSError, RemoteLeaderError, ValueError) as error:
+        if event_sink is not None:
+            event_sink.close()
         raise SystemExit(f"Could not start uarm-web: {error}") from error
     application = create_app(controller, browser_leader_factory=browser_leader_factory)
     if open_browser:
@@ -126,6 +182,7 @@ def run_web(
 
 
 def main() -> None:
+    """Run the ``uarm-web`` command."""
     args = parse_args()
     run_web(
         config_path=args.config,
@@ -136,6 +193,7 @@ def main() -> None:
         leader_timeout=args.leader_timeout,
         browser_pair_leader=args.pair_browser_leader,
         leader_port=args.leader_port,
+        event_log_path=args.event_log,
         open_browser=not args.no_browser,
     )
 

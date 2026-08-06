@@ -10,6 +10,7 @@ from ..config import load_config
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse reference-pose tuning options."""
     parser = argparse.ArgumentParser(
         description="Manually tune the simulated xArm6 reference pose with joint sliders."
     )
@@ -19,11 +20,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def format_reference(degrees: np.ndarray) -> str:
+    """Format six tuned joint angles as a TOML assignment."""
     values = ", ".join(f"{value:.1f}" for value in degrees)
     return f"reference_degrees = [{values}]"
 
 
 def run() -> None:
+    """Open the simulator, allow joint-slider tuning, and print the final pose."""
     try:
         import gymnasium as gym
         import mani_skill.envs  # noqa: F401
@@ -73,10 +76,11 @@ def run() -> None:
         camera_pose = sapien_utils.look_at([0.0, -1.5, 1.25], robot_pose.p)
         raw_pose = camera_pose.raw_pose.squeeze().cpu().numpy()
         viewer.set_camera_pose(sapien.Pose(raw_pose[:3], raw_pose[3:]))
+
         # SAPIEN 3.0.1's expanded joint-details panel passes one-element
         # arrays to scalar widgets and crashes. Keep its useful joint sliders
         # while making the optional +/- expansion a no-op.
-        def ignore_joint_details(*_args) -> None:
+        def ignore_joint_details(*_args: object) -> None:
             return None
 
         for plugin in viewer.plugins:
@@ -100,6 +104,7 @@ def run() -> None:
 
 
 def main() -> None:
+    """Run the ``uarm-tune-reference`` command."""
     try:
         run()
     except KeyboardInterrupt:

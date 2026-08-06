@@ -12,6 +12,8 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "uarm_xa
 
 @dataclass(frozen=True)
 class SerialConfig:
+    """Describe the Feetech serial bus and ordered servo IDs."""
+
     device: str
     baudrate: int
     ids: tuple[int, ...]
@@ -19,6 +21,8 @@ class SerialConfig:
 
 @dataclass(frozen=True)
 class LeaderConfig:
+    """Define leader calibration, directions, and display labels."""
+
     midpoint: int
     gripper_zero_position: int
     gripper_pressed_position: int
@@ -28,6 +32,8 @@ class LeaderConfig:
 
 @dataclass(frozen=True)
 class XArm6Config:
+    """Define leader-to-follower joint and gripper mapping parameters."""
+
     reference_degrees: tuple[float, ...]
     joint_directions: tuple[int, ...]
     gripper_travel_degrees: float
@@ -39,12 +45,16 @@ class XArm6Config:
 
 @dataclass(frozen=True)
 class SimulationConfig:
+    """Configure the ManiSkill scene and control frequency."""
+
     scene: str
     rate: float
 
 
 @dataclass(frozen=True)
 class PhysicalXArmConfig:
+    """Define physical xArm connection, motion limits, and watchdog settings."""
+
     robot_ip: str
     rate: float
     mode: int
@@ -65,6 +75,8 @@ class PhysicalXArmConfig:
 
 @dataclass(frozen=True)
 class TeleopConfig:
+    """Collect the validated configuration for every teleoperation component."""
+
     serial: SerialConfig
     leader: LeaderConfig
     xarm6: XArm6Config
@@ -80,6 +92,17 @@ def _section(data: dict, name: str) -> dict:
 
 
 def validate_config(config: TeleopConfig) -> TeleopConfig:
+    """Validate cross-field dimensions, ranges, and physical safety invariants.
+
+    Args:
+        config: Fully constructed configuration to validate.
+
+    Returns:
+        The unchanged configuration when every invariant holds.
+
+    Raises:
+        ValueError: If a dimension, range, mode, or safety constraint is invalid.
+    """
     joint_count = len(config.serial.ids)
     if joint_count != 7 or len(set(config.serial.ids)) != 7:
         raise ValueError("serial.ids must contain seven unique servo IDs")
@@ -112,9 +135,7 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
     if config.xarm6.gripper_release_degrees < 0:
         raise ValueError("xarm6.gripper_release_degrees cannot be negative")
     if config.xarm6.gripper_press_degrees <= config.xarm6.gripper_release_degrees:
-        raise ValueError(
-            "xarm6.gripper_press_degrees must exceed gripper_release_degrees"
-        )
+        raise ValueError("xarm6.gripper_press_degrees must exceed gripper_release_degrees")
     if config.simulation.rate <= 0:
         raise ValueError("simulation.rate must be positive")
     physical = config.physical_xarm
@@ -140,9 +161,7 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
         raise ValueError("physical_xarm joint limits must contain six values")
     if any(
         lower >= upper
-        for lower, upper in zip(
-            physical.joint_lower_degrees, physical.joint_upper_degrees
-        )
+        for lower, upper in zip(physical.joint_lower_degrees, physical.joint_upper_degrees)
     ):
         raise ValueError("physical_xarm lower joint limits must be below upper limits")
     if not 0 <= physical.gripper_open_position <= 84:
@@ -150,9 +169,7 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
     if not 0 <= physical.gripper_closed_position <= 84:
         raise ValueError("physical_xarm.gripper_closed_position must be between 0 and 84")
     if physical.gripper_open_position <= physical.gripper_closed_position:
-        raise ValueError(
-            "physical_xarm.gripper_open_position must exceed gripper_closed_position"
-        )
+        raise ValueError("physical_xarm.gripper_open_position must exceed gripper_closed_position")
     if not 15 <= physical.gripper_speed <= 225:
         raise ValueError("physical_xarm.gripper_speed must be between 15 and 225")
     if not 1 <= physical.gripper_force <= 100:
@@ -161,7 +178,18 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
 
 
 def load_config(path: str | Path | None = None) -> TeleopConfig:
-    """Load the project TOML configuration, optionally overlaid by another TOML."""
+    """Load the base TOML configuration with an optional machine-local overlay.
+
+    Args:
+        path: Overlay file whose tables are merged onto the packaged defaults.
+
+    Returns:
+        A typed and validated teleoperation configuration.
+
+    Raises:
+        OSError: If the base or overlay file cannot be read.
+        ValueError: If TOML content violates a configuration invariant.
+    """
     with DEFAULT_CONFIG_PATH.open("rb") as stream:
         base_data = tomllib.load(stream)
 
@@ -212,18 +240,10 @@ def load_config(path: str | Path | None = None) -> TeleopConfig:
             rate=float(physical_xarm["rate"]),
             mode=int(physical_xarm["mode"]),
             joint_speed_degrees=float(physical_xarm["joint_speed_degrees"]),
-            joint_acceleration_degrees=float(
-                physical_xarm["joint_acceleration_degrees"]
-            ),
-            startup_tolerance_degrees=float(
-                physical_xarm["startup_tolerance_degrees"]
-            ),
-            leader_start_tolerance_degrees=float(
-                physical_xarm["leader_start_tolerance_degrees"]
-            ),
-            max_target_jump_degrees=float(
-                physical_xarm["max_target_jump_degrees"]
-            ),
+            joint_acceleration_degrees=float(physical_xarm["joint_acceleration_degrees"]),
+            startup_tolerance_degrees=float(physical_xarm["startup_tolerance_degrees"]),
+            leader_start_tolerance_degrees=float(physical_xarm["leader_start_tolerance_degrees"]),
+            max_target_jump_degrees=float(physical_xarm["max_target_jump_degrees"]),
             watchdog_timeout=float(physical_xarm["watchdog_timeout"]),
             joint_lower_degrees=tuple(
                 float(value) for value in physical_xarm["joint_lower_degrees"]

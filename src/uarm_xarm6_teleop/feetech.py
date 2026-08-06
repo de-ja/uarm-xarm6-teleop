@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from types import TracebackType
+from typing import Self
 
 import numpy as np
 
@@ -36,35 +38,39 @@ class FeetechError(RuntimeError):
 
 @dataclass(frozen=True)
 class LeaderSample:
+    """Represent one complete timestamped sample from the seven leader servos."""
+
     timestamp: float
     positions: tuple[int, ...]
     radians: np.ndarray
 
     @property
     def degrees(self) -> np.ndarray:
+        """Return the calibrated joint angles in degrees."""
         return np.rad2deg(self.radians)
 
 
 class FeetechLeader:
     """Synchronous, read-only connection to all configured leader servos."""
 
-    def __init__(self, serial: SerialConfig, leader: LeaderConfig):
+    def __init__(self, serial: SerialConfig, leader: LeaderConfig) -> None:
         self.serial_config = serial
         self.leader_config = leader
         self.port = PortHandler(serial.device)
         self.packet = PacketHandler(0)
-        self.sync_read = GroupSyncRead(
-            self.port, self.packet, STS_PRESENT_POSITION_L, 2
-        )
+        self.sync_read = GroupSyncRead(self.port, self.packet, STS_PRESENT_POSITION_L, 2)
         self.torque_enabled_ids: tuple[int, ...] = ()
 
     def open(self) -> None:
+        """Open the serial bus and verify every configured servo.
+
+        Raises:
+            FeetechError: If the port, baud rate, or any configured servo is unavailable.
+        """
         try:
             opened = self.port.openPort()
         except Exception as error:
-            raise FeetechError(
-                f"Could not open {self.serial_config.device}: {error}"
-            ) from error
+            raise FeetechError(f"Could not open {self.serial_config.device}: {error}") from error
         if not opened:
             raise FeetechError(f"Could not open {self.serial_config.device}")
         if not self.port.setBaudRate(self.serial_config.baudrate):
@@ -90,6 +96,14 @@ class FeetechLeader:
         self.torque_enabled_ids = tuple(torque_enabled)
 
     def read_positions(self) -> tuple[int, ...]:
+        """Read all configured raw positions in one synchronous bus transaction.
+
+        Returns:
+            Raw positions ordered according to ``SerialConfig.ids``.
+
+        Raises:
+            FeetechError: If the bus read is incomplete or unsuccessful.
+        """
         self.sync_read.clearParam()
         for servo_id in self.serial_config.ids:
             if not self.sync_read.addParam(servo_id):
@@ -97,23 +111,22 @@ class FeetechLeader:
 
         result = self.sync_read.txRxPacket()
         if result != COMM_SUCCESS:
-            raise FeetechError(
-                "Synchronous read failed: " + self.packet.getTxRxResult(result)
-            )
+            raise FeetechError("Synchronous read failed: " + self.packet.getTxRxResult(result))
 
         positions = []
         for servo_id in self.serial_config.ids:
-            available = self.sync_read.isAvailable(
-                servo_id, STS_PRESENT_POSITION_L, 2
-            )
+            available = self.sync_read.isAvailable(servo_id, STS_PRESENT_POSITION_L, 2)
             if not available:
                 raise FeetechError(f"No valid position received from servo ID {servo_id}")
-            positions.append(
-                self.sync_read.getData(servo_id, STS_PRESENT_POSITION_L, 2)
-            )
+            positions.append(self.sync_read.getData(servo_id, STS_PRESENT_POSITION_L, 2))
         return tuple(positions)
 
     def read(self) -> LeaderSample:
+        """Read and calibrate one complete leader sample.
+
+        Returns:
+            Monotonic timestamp, raw positions, and calibrated radians.
+        """
         positions = self.read_positions()
         radians = positions_to_radians(
             positions,
@@ -128,12 +141,18 @@ class FeetechLeader:
         return LeaderSample(time.monotonic(), positions, radians)
 
     def close(self) -> None:
+        """Close the serial port if it is open."""
         if getattr(self.port, "ser", None) is not None:
             self.port.closePort()
 
-    def __enter__(self) -> "FeetechLeader":
+    def __enter__(self) -> Self:
         self.open()
         return self
 
-    def __exit__(self, _exc_type, _exc_value, _traceback) -> None:
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc_value: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
         self.close()

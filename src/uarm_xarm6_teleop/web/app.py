@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -18,39 +18,49 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ..backends.xarm import XArmHardwareError
-from ..camera import CameraError, CameraManager
+from ..capabilities import detect_runtime_capabilities
+from ..camera import CameraError, CameraInfo, CameraManager
 from ..config import TeleopConfig, load_config
-from ..controller import TeleopController, TeleopControllerError, TeleopSnapshot
+from ..controller import TeleopController, TeleopControllerError
 from ..feetech import FeetechError
+from ..protocol import RuntimeCapabilities, TeleopSnapshot
 from ..remote_leader import BrowserPairedRemoteLeaderFactory, RemoteLeaderError
 
 
 class RobotRequest(BaseModel):
+    """Validate a robot-inspection request."""
+
     robot_ip: str = Field(min_length=1, max_length=255)
 
 
 class StartRequest(BaseModel):
+    """Validate a teleoperation mode and optional physical confirmation."""
+
     mode: Literal["dry_run", "simulation", "physical"]
     confirmation: str | None = None
 
 
 class CameraLatencyRequest(BaseModel):
+    """Validate browser-reported capture-to-display latency."""
+
     latency_ms: float = Field(ge=0, le=60_000)
 
 
 class TelemetryClients:
     """Track browser supervision without coupling it to the hardware loop."""
 
-    def __init__(self, controller: TeleopController):
+    def __init__(self, controller: TeleopController) -> None:
         self.controller = controller
         self._lock = threading.Lock()
         self._count = 0
 
     def connected(self) -> None:
+        """Register one telemetry WebSocket client."""
         with self._lock:
             self._count += 1
 
     def disconnected(self) -> bool:
+        """Unregister a client and report whether supervision is now absent."""
         with self._lock:
             self._count = max(0, self._count - 1)
             return self._count == 0
@@ -77,12 +87,26 @@ def create_app(
     camera_manager: CameraManager | None = None,
     browser_leader_factory: BrowserPairedRemoteLeaderFactory | None = None,
 ) -> FastAPI:
-    active_controller = controller or TeleopController(config or load_config())
+    """Build the operator API around explicitly owned controller resources.
+
+    Args:
+        controller: Existing controller, primarily for dependency injection.
+        config: Configuration used only when constructing the default controller.
+        camera_manager: Existing camera manager for dependency injection.
+        browser_leader_factory: Optional factory paired from the operator source address.
+
+    Returns:
+        Configured FastAPI application serving API, telemetry, cameras, and frontend.
+    """
+    active_controller = controller or TeleopController(
+        config or load_config(),
+        capabilities=detect_runtime_capabilities(),
+    )
     active_cameras = camera_manager or CameraManager()
     telemetry_clients = TelemetryClients(active_controller)
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI):
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
         await asyncio.to_thread(active_cameras.close)
         await asyncio.to_thread(active_controller.close)
@@ -110,15 +134,19 @@ def create_app(
     def server_time() -> dict[str, float]:
         return {"timestamp": time.time()}
 
-    @app.get("/api/status")
+    @app.get("/api/status", response_model=TeleopSnapshot)
     def status() -> dict[str, object]:
         return active_controller.snapshot().to_dict()
+
+    @app.get("/api/capabilities", response_model=RuntimeCapabilities)
+    def capabilities() -> RuntimeCapabilities:
+        return active_controller.capabilities
 
     @app.get("/api/config")
     def get_config() -> dict[str, object]:
         return asdict(active_controller.config)
 
-    @app.get("/api/cameras")
+    @app.get("/api/cameras", response_model=list[CameraInfo])
     def cameras() -> list[dict[str, str]]:
         return [camera.to_dict() for camera in active_cameras.list_cameras()]
 
@@ -142,7 +170,7 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {"mode": "auto", "jpeg_quality": quality}
 
-    @app.post("/api/leader/connect")
+    @app.post("/api/leader/connect", response_model=TeleopSnapshot)
     def connect_leader(request: Request) -> dict[str, object]:
         if browser_leader_factory is not None:
             if request.client is None:
@@ -153,11 +181,11 @@ def create_app(
                 raise HTTPException(status_code=409, detail=str(error)) from error
         return _invoke(active_controller.connect_leader)
 
-    @app.post("/api/robot/inspect")
+    @app.post("/api/robot/inspect", response_model=TeleopSnapshot)
     def inspect_robot(request: RobotRequest) -> dict[str, object]:
         return _invoke(lambda: active_controller.inspect_robot(request.robot_ip))
 
-    @app.post("/api/teleop/start")
+    @app.post("/api/teleop/start", response_model=TeleopSnapshot)
     def start_teleop(request: StartRequest) -> dict[str, object]:
         return _invoke(
             lambda: active_controller.start(
@@ -166,15 +194,15 @@ def create_app(
             )
         )
 
-    @app.post("/api/teleop/stop")
+    @app.post("/api/teleop/stop", response_model=TeleopSnapshot)
     def stop_teleop() -> dict[str, object]:
         return _invoke(active_controller.stop)
 
-    @app.post("/api/session/disconnect")
+    @app.post("/api/session/disconnect", response_model=TeleopSnapshot)
     def disconnect() -> dict[str, object]:
         return _invoke(active_controller.disconnect)
 
-    @app.post("/api/fault/reset")
+    @app.post("/api/fault/reset", response_model=TeleopSnapshot)
     def reset_fault() -> dict[str, object]:
         return _invoke(active_controller.reset_fault)
 

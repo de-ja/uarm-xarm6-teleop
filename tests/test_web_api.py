@@ -11,6 +11,7 @@ from uarm_xarm6_teleop.controller import (
     TeleopControllerError,
     TeleopSnapshot,
 )
+from uarm_xarm6_teleop.protocol import RuntimeCapabilities
 from uarm_xarm6_teleop.web.app import (
     CameraLatencyRequest,
     StartRequest,
@@ -23,13 +24,24 @@ from uarm_xarm6_teleop.web.app import (
 class StubController:
     def __init__(self):
         self.config = load_config()
+        self.capabilities = RuntimeCapabilities(
+            leader_transport="remote_browser_pairing",
+            simulation_available=True,
+            physical_available=True,
+            camera_streaming=True,
+            structured_logging=False,
+            video_transport="mjpeg",
+            max_robots=1,
+        )
         self.current_state = "idle"
         self.stop_calls = 0
         self.closed = False
 
     def snapshot(self):
         return TeleopSnapshot(
-            protocol_version=2,
+            protocol_version=3,
+            session_id="test-session",
+            capabilities=self.capabilities,
             timestamp=100.0,
             state=self.current_state,
             mode=None,
@@ -86,6 +98,7 @@ class WebApiTests(unittest.TestCase):
     def test_api_routes_and_built_frontend_are_present(self):
         paths = {route.path for route in self.app.routes}
         self.assertIn("/api/status", paths)
+        self.assertIn("/api/capabilities", paths)
         self.assertIn("/api/time", paths)
         self.assertIn("/api/cameras", paths)
         self.assertIn("/api/cameras/{camera_id}/stream", paths)
@@ -96,6 +109,27 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("", paths)  # StaticFiles mount at the application root.
         frontend = Path(__file__).parents[1] / "src/uarm_xarm6_teleop/web/dist/index.html"
         self.assertIn("U-ARM Operator", frontend.read_text())
+
+    def test_capabilities_endpoint_exposes_backend_features(self):
+        route = next(route for route in self.app.routes if route.path == "/api/capabilities")
+
+        result = route.endpoint()
+
+        self.assertTrue(result.physical_available)
+        self.assertEqual(result.leader_transport, "remote_browser_pairing")
+        self.assertEqual(result.max_robots, 1)
+
+    def test_openapi_schema_owns_the_frontend_protocol_contract(self):
+        schemas = self.app.openapi()["components"]["schemas"]
+
+        snapshot = schemas["TeleopSnapshot"]
+        self.assertIn("session_id", snapshot["required"])
+        self.assertIn("capabilities", snapshot["required"])
+        self.assertEqual(schemas["RuntimeCapabilities"]["properties"]["max_robots"]["const"], 1)
+        self.assertEqual(
+            schemas["RuntimeCapabilities"]["properties"]["video_transport"]["const"],
+            "mjpeg",
+        )
 
     def test_time_endpoint_returns_a_wall_clock_timestamp(self):
         route = next(route for route in self.app.routes if route.path == "/api/time")

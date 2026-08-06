@@ -6,66 +6,33 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, replace
-from enum import Enum
+from dataclasses import replace
+from types import TracebackType
 from typing import Literal, Protocol, Self
+from uuid import uuid4
 
 import numpy as np
 
 from .backends.maniskill import ManiSkillXArm6
 from .backends.xarm import TargetSafety, XArm6Hardware, XArmHardwareError, XArmStatus
-from .config import TeleopConfig, validate_config
+from .config import LeaderConfig, PhysicalXArmConfig, SerialConfig, TeleopConfig, validate_config
 from .feetech import FeetechLeader, LeaderSample
+from .event_log import EventSink
 from .mapping import XArm6Mapping
+from .protocol import (
+    PROTOCOL_VERSION,
+    ControllerEvent,
+    RuntimeCapabilities,
+    TeleopMode,
+    TeleopSnapshot,
+    TeleopState,
+    default_runtime_capabilities,
+)
+from .scheduling import PeriodicScheduler, RateMeter
 
 
 class TeleopControllerError(RuntimeError):
     """Raised when a requested supervisory transition is invalid or unsafe."""
-
-
-class TeleopState(str, Enum):
-    IDLE = "idle"
-    LEADER_READY = "leader_ready"
-    READY = "ready"
-    STARTING = "starting"
-    RUNNING = "running"
-    STOPPING = "stopping"
-    STOPPED = "stopped"
-    FAULT = "fault"
-
-
-TeleopMode = Literal["dry_run", "simulation", "physical"]
-
-
-@dataclass(frozen=True)
-class ControllerEvent:
-    timestamp: float
-    level: Literal["info", "warning", "error"]
-    message: str
-
-
-@dataclass(frozen=True)
-class TeleopSnapshot:
-    protocol_version: int
-    timestamp: float
-    state: str
-    mode: str | None
-    leader_connected: bool
-    robot_connected: bool
-    robot_ip: str
-    torque_enabled_ids: tuple[int, ...]
-    leader_degrees: tuple[float, ...] | None
-    target_degrees: tuple[float, ...] | None
-    gripper_command: float | None
-    robot_status: dict[str, object] | None
-    loop_rate_hz: float
-    command_latency_ms: float | None
-    last_sample_age_ms: float | None
-    fault: str | None
-    events: tuple[ControllerEvent, ...]
-
-    def to_dict(self) -> dict[str, object]:
-        return asdict(self)
 
 
 class _Leader(Protocol):
@@ -99,12 +66,13 @@ class _Simulator(Protocol):
     def close(self) -> None: ...
 
 
-LeaderFactory = Callable[[object, object], _Leader]
-FollowerFactory = Callable[[object], _Follower]
+LeaderFactory = Callable[[SerialConfig, LeaderConfig], _Leader]
+FollowerFactory = Callable[[PhysicalXArmConfig], _Follower]
 SimulationFactory = Callable[[str], _Simulator]
 
 
 def make_mapping(config: TeleopConfig) -> XArm6Mapping:
+    """Construct a stateful leader-to-xArm mapping from validated configuration."""
     return XArm6Mapping(
         reference_degrees=config.xarm6.reference_degrees,
         joint_directions=config.xarm6.joint_directions,
@@ -117,6 +85,15 @@ def make_mapping(config: TeleopConfig) -> XArm6Mapping:
 
 
 def require_safe_leader_start(config: TeleopConfig, sample: LeaderSample) -> None:
+    """Require every leader arm joint to begin near its calibrated CAD pose.
+
+    Args:
+        config: Configuration containing the physical startup tolerance.
+        sample: Current calibrated leader sample.
+
+    Raises:
+        XArmHardwareError: If any of the six arm joints exceeds the tolerance.
+    """
     offsets = np.abs(sample.degrees[:6])
     joint = int(np.argmax(offsets))
     tolerance = config.physical_xarm.leader_start_tolerance_degrees
@@ -128,7 +105,23 @@ def require_safe_leader_start(config: TeleopConfig, sample: LeaderSample) -> Non
 
 
 class TeleopController:
-    """Own all hardware and expose explicit, serialized teleoperation transitions."""
+    """Own hardware and expose explicit, serialized teleoperation transitions.
+
+    The controller is the safety boundary shared by CLI and web callers. Public
+    operations are serialized separately from the telemetry lock so only one
+    hardware lifecycle transition can proceed at a time.
+
+    Args:
+        config: Validated configuration for mapping, simulation, and hardware.
+        leader_factory: Factory for a local or remote U-ARM reader.
+        follower_factory: Factory for the physical xArm backend.
+        simulation_factory: Factory for the visible simulation backend.
+        monotonic: Clock used for scheduling and latency measurement.
+        wall_time: Clock used for operator-visible timestamps.
+        capabilities: Deployment features exposed in every telemetry snapshot.
+        session_id: Stable session identifier, generated when omitted.
+        event_sink: Optional nonblocking destination for structured controller events.
+    """
 
     def __init__(
         self,
@@ -139,13 +132,20 @@ class TeleopController:
         simulation_factory: SimulationFactory = ManiSkillXArm6,
         monotonic: Callable[[], float] = time.monotonic,
         wall_time: Callable[[], float] = time.time,
-    ):
+        capabilities: RuntimeCapabilities | None = None,
+        session_id: str | None = None,
+        event_sink: EventSink | None = None,
+    ) -> None:
         self.config = validate_config(config)
         self._leader_factory = leader_factory
         self._follower_factory = follower_factory
         self._simulation_factory = simulation_factory
         self._monotonic = monotonic
         self._wall_time = wall_time
+        self.capabilities = capabilities or default_runtime_capabilities()
+        self.session_id = session_id or uuid4().hex
+        self._event_sink = event_sink
+        self._event_sink_closed = False
         self._lock = threading.RLock()
         self._operation_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -172,12 +172,19 @@ class TeleopController:
 
     @property
     def state(self) -> TeleopState:
+        """Return the current controller lifecycle state."""
         with self._lock:
             return self._state
 
     def _event(self, level: Literal["info", "warning", "error"], message: str) -> None:
+        event = ControllerEvent(self._wall_time(), level, message)
         with self._lock:
-            self._events.append(ControllerEvent(self._wall_time(), level, message))
+            self._events.append(event)
+        if self._event_sink is not None:
+            try:
+                self._event_sink.emit(self.session_id, event)
+            except Exception:  # noqa: BLE001,S110 - logging cannot affect robot safety
+                pass
 
     def _require_state(self, *allowed: TeleopState) -> None:
         if self._state not in allowed:
@@ -234,10 +241,11 @@ class TeleopController:
                 self._monitor = None
 
     def _run_leader_monitor(self) -> None:
-        period = 1.0 / self._physical_config.rate
-        next_step = self._monotonic()
-        rate_started = next_step
-        rate_samples = 0
+        scheduler = PeriodicScheduler(
+            self._physical_config.rate,
+            monotonic=self._monotonic,
+        )
+        rate_meter = RateMeter(monotonic=self._monotonic)
         try:
             while not self._monitor_stop_event.is_set():
                 with self._lock:
@@ -248,20 +256,12 @@ class TeleopController:
                 self._update_sample(sample, validate_safety=False)
 
                 now = self._monotonic()
-                rate_samples += 1
-                elapsed = now - rate_started
-                if elapsed >= 0.5:
+                measured_rate = rate_meter.record(now)
+                if measured_rate is not None:
                     with self._lock:
-                        self._loop_rate_hz = rate_samples / elapsed
-                    rate_started = now
-                    rate_samples = 0
+                        self._loop_rate_hz = measured_rate
 
-                next_step += period
-                delay = next_step - self._monotonic()
-                if delay > 0:
-                    self._monitor_stop_event.wait(delay)
-                else:
-                    next_step = self._monotonic()
+                scheduler.wait(self._monitor_stop_event)
         except Exception as error:  # noqa: BLE001 - monitor boundary owns serial reads
             if not self._monitor_stop_event.is_set():
                 with self._lock:
@@ -274,6 +274,16 @@ class TeleopController:
                     self._monitor = None
 
     def connect_leader(self) -> TeleopSnapshot:
+        """Open the configured leader, read a baseline sample, and start monitoring.
+
+        Returns:
+            Snapshot in the ``leader_ready`` state.
+
+        Raises:
+            TeleopControllerError: If the controller is not idle.
+            FeetechError: If a local leader cannot be opened or sampled.
+            RemoteLeaderError: If a remote leader cannot authenticate or respond.
+        """
         with self._operation_lock:
             with self._lock:
                 self._require_state(TeleopState.IDLE)
@@ -305,6 +315,18 @@ class TeleopController:
             return self.snapshot()
 
     def inspect_robot(self, robot_ip: str) -> TeleopSnapshot:
+        """Inspect a physical xArm without enabling motion.
+
+        Args:
+            robot_ip: Controller address reachable from the follower computer.
+
+        Returns:
+            Snapshot containing read-only robot and gripper status.
+
+        Raises:
+            TeleopControllerError: If the leader is unavailable or state is invalid.
+            XArmHardwareError: If the robot cannot be verified as an xArm6.
+        """
         robot_ip = robot_ip.strip()
         if not robot_ip:
             raise TeleopControllerError("Robot IP is required")
@@ -373,6 +395,19 @@ class TeleopController:
         *,
         confirmation: str | None = None,
     ) -> TeleopSnapshot:
+        """Start one dry-run, simulation, or physical control worker.
+
+        Args:
+            mode: Execution backend to run.
+            confirmation: Robot IP required to authorize physical motion.
+
+        Returns:
+            Snapshot after the worker has entered its starting phase.
+
+        Raises:
+            TeleopControllerError: If prerequisites or the current state are invalid.
+            XArmHardwareError: If physical startup safety checks fail.
+        """
         if mode not in ("dry_run", "simulation", "physical"):
             raise TeleopControllerError(f"Unsupported teleoperation mode: {mode}")
         with self._operation_lock:
@@ -462,11 +497,9 @@ class TeleopController:
             rate = (
                 self.config.simulation.rate if mode == "simulation" else self._physical_config.rate
             )
-            period = 1.0 / rate
-            next_step = self._monotonic()
-            next_status_poll = next_step
-            rate_started = next_step
-            rate_samples = 0
+            scheduler = PeriodicScheduler(rate, monotonic=self._monotonic)
+            next_status_poll = self._monotonic()
+            rate_meter = RateMeter(monotonic=self._monotonic)
             last_contact_state = False
             while not self._stop_event.is_set():
                 with self._lock:
@@ -500,13 +533,10 @@ class TeleopController:
                     simulator.step(action)
 
                 now = self._monotonic()
-                rate_samples += 1
-                elapsed = now - rate_started
-                if elapsed >= 0.5:
+                measured_rate = rate_meter.record(now)
+                if measured_rate is not None:
                     with self._lock:
-                        self._loop_rate_hz = rate_samples / elapsed
-                    rate_started = now
-                    rate_samples = 0
+                        self._loop_rate_hz = measured_rate
 
                 if mode == "physical" and follower is not None and now >= next_status_poll:
                     status = follower.inspect()
@@ -514,12 +544,7 @@ class TeleopController:
                         self._robot_status = status
                     next_status_poll = now + 0.25
 
-                next_step += period
-                delay = next_step - self._monotonic()
-                if delay > 0:
-                    self._stop_event.wait(delay)
-                else:
-                    next_step = self._monotonic()
+                scheduler.wait(self._stop_event)
         except Exception as error:  # noqa: BLE001 - worker boundary must fail safe
             with self._lock:
                 self._fault = str(error)
@@ -555,6 +580,14 @@ class TeleopController:
                 self._start_leader_monitor()
 
     def stop(self, *, timeout: float = 2.0) -> TeleopSnapshot:
+        """Request the active worker to stop and wait for bounded cleanup.
+
+        Args:
+            timeout: Maximum seconds to wait for the worker.
+
+        Returns:
+            Current snapshot, including a fault if the worker did not stop in time.
+        """
         with self._operation_lock:
             with self._lock:
                 worker = self._worker
@@ -576,6 +609,7 @@ class TeleopController:
             return self.snapshot()
 
     def disconnect(self) -> TeleopSnapshot:
+        """Stop motion, close both hardware connections, and return to idle."""
         self.stop()
         with self._operation_lock:
             self._stop_leader_monitor()
@@ -608,11 +642,20 @@ class TeleopController:
             return self.snapshot()
 
     def reset_fault(self) -> TeleopSnapshot:
+        """Clear a fault by performing a full disconnect.
+
+        Returns:
+            Idle snapshot after resources are closed.
+
+        Raises:
+            TeleopControllerError: If the controller is not faulted.
+        """
         with self._lock:
             self._require_state(TeleopState.FAULT)
         return self.disconnect()
 
     def snapshot(self) -> TeleopSnapshot:
+        """Return a consistent immutable view of state and recent telemetry."""
         now_mono = self._monotonic()
         with self._lock:
             last_age = (
@@ -631,12 +674,13 @@ class TeleopController:
                 else tuple(float(value) for value in np.rad2deg(self._action[:6]))
             )
             gripper_command = None if self._action is None else float(self._action[6])
-            status = None if self._robot_status is None else asdict(self._robot_status)
             torque_ids = () if self._leader is None else self._leader.torque_enabled_ids
             return TeleopSnapshot(
-                protocol_version=2,
+                protocol_version=PROTOCOL_VERSION,
+                session_id=self.session_id,
+                capabilities=self.capabilities,
                 timestamp=self._wall_time(),
-                state=self._state.value,
+                state=self._state,
                 mode=self._mode,
                 leader_connected=self._leader is not None,
                 robot_connected=self._follower is not None,
@@ -645,7 +689,7 @@ class TeleopController:
                 leader_degrees=leader_degrees,
                 target_degrees=target_degrees,
                 gripper_command=gripper_command,
-                robot_status=status,
+                robot_status=self._robot_status,
                 loop_rate_hz=self._loop_rate_hz,
                 command_latency_ms=self._command_latency_ms,
                 last_sample_age_ms=last_age,
@@ -654,14 +698,28 @@ class TeleopController:
             )
 
     def close(self) -> None:
+        """Best-effort shutdown for process exit and context-manager cleanup."""
         try:
             self.disconnect()
         except Exception:  # noqa: BLE001,S110 - process shutdown is best-effort
             # Shutdown remains best-effort; the hardware backend already requests state 4.
             pass
+        with self._lock:
+            sink = None if self._event_sink_closed else self._event_sink
+            self._event_sink_closed = True
+        if sink is not None:
+            try:
+                sink.close()
+            except Exception:  # noqa: BLE001,S110 - shutdown remains best-effort
+                pass
 
     def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, _exc_type, _exc_value, _traceback) -> None:
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc_value: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
         self.close()

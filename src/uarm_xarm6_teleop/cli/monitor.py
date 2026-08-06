@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
-import time
-
-from ..feetech import FeetechError, FeetechLeader
+from ..config import TeleopConfig
+from ..feetech import FeetechError, FeetechLeader, LeaderSample
+from ..scheduling import PeriodicScheduler
 from .common import add_connection_arguments, config_from_args
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse read-only monitor options."""
     parser = argparse.ArgumentParser(description="Monitor the Feetech U-ARM read-only.")
     add_connection_arguments(parser)
     parser.add_argument("--rate", type=float, default=10.0, help="refresh rate in Hz")
@@ -20,7 +21,8 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def print_sample(config, sample, clear: bool) -> None:
+def print_sample(config: TeleopConfig, sample: LeaderSample, clear: bool) -> None:
+    """Render one leader sample as a terminal table."""
     if clear:
         print("\033[2J\033[H", end="")
     print("Feetech U-ARM (read-only; configured initial pose = 0 deg)\n")
@@ -36,22 +38,22 @@ def print_sample(config, sample, clear: bool) -> None:
 
 
 def run() -> None:
+    """Open the leader and print samples at the requested rate."""
     args = parse_args()
     config = config_from_args(args)
-    period = 1.0 / args.rate
-
     with FeetechLeader(config.serial, config.leader) as leader:
+        scheduler = PeriodicScheduler(args.rate)
         if leader.torque_enabled_ids:
             print(f"WARNING: torque is enabled on IDs {leader.torque_enabled_ids}.")
         while True:
-            started = time.monotonic()
             print_sample(config, leader.read(), clear=not args.once)
             if args.once:
                 return
-            time.sleep(max(0.0, period - (time.monotonic() - started)))
+            scheduler.wait()
 
 
 def main() -> None:
+    """Run the ``uarm-monitor`` command."""
     try:
         run()
     except KeyboardInterrupt:

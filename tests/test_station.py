@@ -85,6 +85,7 @@ class StationTests(unittest.TestCase):
                 leader_timeout=0.2,
                 browser_pair_leader=True,
                 leader_port=8765,
+                event_log_path=None,
                 open_browser=False,
             )
 
