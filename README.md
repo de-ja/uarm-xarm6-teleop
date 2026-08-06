@@ -11,10 +11,29 @@ EEPROM, torque state, or goal positions.
 ## Architecture
 
 ```text
-Feetech U-ARM -> calibrated joint angles -> xArm6 mapping -> backend
-                                                        |- ManiSkill
-                                                        `- physical xArm6
+Single computer
+  U-ARM USB -> FeetechLeader -> TeleopController -> mapping/safety -> simulator or xArm6
+
+Two computers
+  laptop:  U-ARM USB -> uarm-leader ===== fresh samples =====>
+  desktop: browser -> FastAPI -> TeleopController -> mapping/safety -> simulator or xArm6
 ```
+
+`TeleopController` is the single lifecycle and safety boundary. The browser can
+request transitions but never accesses USB or the xArm SDK. In wireless mode,
+the laptop retains exclusive U-ARM serial ownership while the desktop retains
+mapping, validation, the physical command loop, and the xArm watchdog.
+
+Project documentation:
+
+- [`docs/architecture.md`](docs/architecture.md): component ownership, state
+  machine, concurrency, safety invariants, and improvement roadmap.
+- [`docs/architecture-tasks.md`](docs/architecture-tasks.md): implementation
+  status and acceptance criteria for future architecture work.
+- [`docs/wireless-teleop.md`](docs/wireless-teleop.md): complete private-router
+  or hotspot deployment.
+- [`docs/references.md`](docs/references.md): reviewed open-source references
+  and the ideas adopted from them.
 
 The leader is expected to have Feetech STS servos at IDs 1-7, ordered from the
 base to the trigger. The CAD/rest pose must already be persistently calibrated
@@ -48,7 +67,9 @@ For development and tests, also install the development tools:
 
 ```bash
 python -m pip install -e ".[dev]"
-python -m unittest discover -s tests -v
+ruff format --check src tests scripts
+ruff check src tests scripts
+pytest -q
 ```
 
 Install UFACTORY's maintained Python SDK only on a computer that will connect
@@ -419,6 +440,17 @@ browser. To load a private configuration or suppress the browser launch:
 uarm-web --config configs/local.toml --no-browser
 ```
 
+Optional structured session events can be written outside the repository:
+
+```bash
+uarm-web --event-log ~/.local/state/uarm/events.jsonl
+uarm-station --event-log ~/.local/state/uarm/events.jsonl
+```
+
+The file uses JSON Lines with schema version, session ID, timestamp, severity,
+and message. A dedicated writer thread performs file I/O; control loops only
+attempt a bounded, nonblocking queue operation.
+
 The normal workflow is:
 
 1. Connect the leader. This is read-only; the leader pose and mapped target are
@@ -500,7 +532,38 @@ npm run check
 npm run build
 ```
 
+`frontend/src/types.ts` is generated from FastAPI's OpenAPI response schemas.
+After changing API dataclasses or response models, regenerate and validate it:
+
+```bash
+python scripts/generate_protocol.py
+python scripts/generate_protocol.py --check
+```
+
+### Python documentation standard
+
+Public production modules, classes, functions, methods, and properties use
+Google-style docstrings together with Python type hints. Document parameters,
+returns, and raised exceptions when they are not obvious from the signature.
+Comments should explain hardware constraints, safety intent, protocol choices,
+or non-obvious workarounds—not restate the code. Ruff enforces production
+function annotations and the public API docstring requirement; tests and
+generated frontend assets are excluded.
+
+Run the complete Python validation before committing:
+
+```bash
+ruff format --check src tests scripts
+ruff check src tests scripts
+pytest -q
+```
+
+GitHub Actions runs the same backend checks, builds a wheel, and separately
+runs frontend tests, TypeScript checking, and the production build on every
+push and pull request.
+
 The backend architecture and reviewed upstream references are documented in
+[`docs/architecture.md`](docs/architecture.md) and
 [`docs/references.md`](docs/references.md).
 
 ## Physical xArm6 workflow
