@@ -19,6 +19,7 @@ from .config import LeaderConfig, PhysicalXArmConfig, SerialConfig, TeleopConfig
 from .feetech import FeetechLeader, LeaderSample
 from .event_log import EventSink
 from .mapping import XArm6Mapping
+from .remote_leader import RemoteLeaderTimeout
 from .protocol import (
     PROTOCOL_VERSION,
     ControllerEvent,
@@ -48,6 +49,11 @@ class _Leader(Protocol):
 class _Follower(Protocol):
     @property
     def gripper_contact_latched(self) -> bool: ...
+
+    @property
+    def catching_up(self) -> bool: ...
+
+    def begin_catch_up(self) -> None: ...
 
     def inspect(self) -> XArmStatus: ...
 
@@ -228,6 +234,24 @@ class TeleopController:
             self._monitor = monitor
             monitor.start()
 
+    def _tolerate_leader_timeout(self, error: RemoteLeaderTimeout, misses: int) -> bool:
+        """Decide whether one more consecutive leader timeout may be absorbed.
+
+        Args:
+            error: The timeout raised by the remote leader transport.
+            misses: Consecutive timeouts including this one.
+
+        Returns:
+            Whether the caller may skip this cycle instead of faulting.
+        """
+        if misses > self.config.wireless.leader_max_consecutive_timeouts:
+            return False
+        if misses == 1:
+            # Only the first miss of a burst is reported, so a degraded link
+            # cannot flood the bounded event queue.
+            self._event("warning", f"Leader sample timed out; retrying ({error}).")
+        return True
+
     def _stop_leader_monitor(self, *, timeout: float = 2.0) -> None:
         with self._lock:
             monitor = self._monitor
@@ -246,13 +270,22 @@ class TeleopController:
             monotonic=self._monotonic,
         )
         rate_meter = RateMeter(monotonic=self._monotonic)
+        misses = 0
         try:
             while not self._monitor_stop_event.is_set():
                 with self._lock:
                     leader = self._leader
                 if leader is None:
                     return
-                sample = leader.read()
+                try:
+                    sample = leader.read()
+                except RemoteLeaderTimeout as error:
+                    misses += 1
+                    if not self._tolerate_leader_timeout(error, misses):
+                        raise
+                    scheduler.wait(self._monitor_stop_event)
+                    continue
+                misses = 0
                 self._update_sample(sample, validate_safety=False)
 
                 now = self._monotonic()
@@ -501,6 +534,8 @@ class TeleopController:
             next_status_poll = self._monotonic()
             rate_meter = RateMeter(monotonic=self._monotonic)
             last_contact_state = False
+            misses = 0
+            catching_up = False
             while not self._stop_event.is_set():
                 with self._lock:
                     leader = self._leader
@@ -509,7 +544,27 @@ class TeleopController:
                     raise TeleopControllerError(
                         "Leader disconnected while teleoperation was active"
                     )
-                sample = leader.read()
+                try:
+                    sample = leader.read()
+                except RemoteLeaderTimeout as error:
+                    misses += 1
+                    if not self._tolerate_leader_timeout(error, misses):
+                        raise
+                    # No command is sent while blind. Configuration guarantees the
+                    # accumulated gap stays below the robot-local watchdog timeout.
+                    continue
+                if misses:
+                    self._event(
+                        "info",
+                        f"Leader link recovered after {misses} timed-out samples; "
+                        f"slewing toward the leader.",
+                    )
+                    misses = 0
+                    # The leader kept moving while the follower held still, so the
+                    # next targets are rate limited rather than rejected as a jump.
+                    if mode == "physical" and follower is not None:
+                        follower.begin_catch_up()
+                    catching_up = True
                 self._update_sample(sample)
                 with self._lock:
                     assert self._action is not None
@@ -528,6 +583,9 @@ class TeleopController:
                     if contact_state and not last_contact_state:
                         self._event("warning", "G2 grasp detected; further closing is latched off.")
                     last_contact_state = contact_state
+                    if catching_up and not follower.catching_up:
+                        self._event("info", "Follower caught up with the leader.")
+                        catching_up = False
                 elif mode == "simulation":
                     assert simulator is not None
                     simulator.step(action)

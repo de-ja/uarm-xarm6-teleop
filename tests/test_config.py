@@ -20,6 +20,12 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.physical_xarm.rate, 20.0)
         self.assertEqual(config.physical_xarm.gripper_force, 20)
         self.assertEqual(len(config.physical_xarm.joint_lower_degrees), 6)
+        self.assertEqual(config.wireless.leader_timeout, 0.15)
+        self.assertEqual(config.wireless.leader_max_consecutive_timeouts, 4)
+        self.assertEqual(config.wireless.browser_grace_seconds, 2.0)
+        self.assertEqual(config.physical_xarm.watchdog_timeout, 1.0)
+        self.assertEqual(config.physical_xarm.catchup_step_degrees, 3.0)
+        self.assertEqual(config.physical_xarm.catchup_max_divergence_degrees, 45.0)
 
     def test_partial_config_uses_other_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -42,6 +48,44 @@ class ConfigTests(unittest.TestCase):
             path.write_text("[physical_xarm]\nmode = 0\n")
             with self.assertRaisesRegex(ValueError, "mode must be 6"):
                 load_config(path)
+
+    def test_wireless_override_is_applied(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text("[wireless]\nleader_timeout = 0.05\n")
+            config = load_config(path)
+        self.assertEqual(config.wireless.leader_timeout, 0.05)
+        self.assertEqual(config.physical_xarm.rate, 20.0)
+
+    def test_non_positive_leader_timeout_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text("[wireless]\nleader_timeout = 0\n")
+            with self.assertRaisesRegex(ValueError, "leader_timeout must be positive"):
+                load_config(path)
+
+    def test_blind_time_beyond_watchdog_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text(
+                "[wireless]\nleader_timeout = 0.3\nleader_max_consecutive_timeouts = 4\n"
+            )
+            with self.assertRaisesRegex(ValueError, "watchdog_timeout"):
+                load_config(path)
+
+    def test_catchup_step_beyond_jump_limit_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text("[physical_xarm]\ncatchup_step_degrees = 25.0\n")
+            with self.assertRaisesRegex(ValueError, "catchup_step_degrees"):
+                load_config(path)
+
+    def test_zero_tolerance_is_allowed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text("[wireless]\nleader_max_consecutive_timeouts = 0\n")
+            config = load_config(path)
+        self.assertEqual(config.wireless.leader_max_consecutive_timeouts, 0)
 
     def test_invalid_toggle_hysteresis_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -82,7 +82,7 @@ class StationTests(unittest.TestCase):
                 host="0.0.0.0",
                 port=8000,
                 leader_token_file=token_path,
-                leader_timeout=0.2,
+                leader_timeout=None,
                 browser_pair_leader=True,
                 leader_port=8765,
                 event_log_path=None,

@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from pathlib import Path
 
@@ -226,6 +227,58 @@ class WebApiTests(unittest.TestCase):
         clients.connected()
         if clients.disconnected():
             self.controller.stop()
+        self.assertEqual(self.controller.stop_calls, 1)
+
+    def test_supervision_tracks_reconnecting_clients(self):
+        clients = TelemetryClients(self.controller)
+        clients.connected()
+        self.assertTrue(clients.supervised)
+        self.assertTrue(clients.disconnected())
+        self.assertFalse(clients.supervised)
+        clients.connected()
+        self.assertTrue(clients.supervised)
+
+    def test_browser_reconnect_within_grace_period_keeps_motion(self):
+        self.controller.current_state = "running"
+
+        async def scenario():
+            clients = TelemetryClients(self.controller, grace_seconds=0.01)
+            clients.connected()
+            self.assertTrue(clients.disconnected())
+            clients.schedule_stop()
+            await asyncio.sleep(0)
+            # The browser returns inside the grace period.
+            clients.connected()
+            # Wait well past the grace period: motion must survive it.
+            await asyncio.sleep(0.2)
+
+        asyncio.run(scenario())
+        self.assertEqual(self.controller.stop_calls, 0)
+
+    def test_browser_drop_beyond_grace_period_stops_motion(self):
+        self.controller.current_state = "running"
+
+        async def scenario():
+            clients = TelemetryClients(self.controller, grace_seconds=0.01)
+            clients.connected()
+            self.assertTrue(clients.disconnected())
+            clients.schedule_stop()
+            await asyncio.sleep(0.2)
+
+        asyncio.run(scenario())
+        self.assertEqual(self.controller.stop_calls, 1)
+
+    def test_zero_grace_stops_motion_immediately(self):
+        self.controller.current_state = "running"
+
+        async def scenario():
+            clients = TelemetryClients(self.controller, grace_seconds=0.0)
+            clients.connected()
+            self.assertTrue(clients.disconnected())
+            clients.schedule_stop()
+            await asyncio.sleep(0.05)
+
+        asyncio.run(scenario())
         self.assertEqual(self.controller.stop_calls, 1)
 
 

@@ -37,8 +37,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--leader-timeout",
         type=float,
-        default=0.2,
-        help="remote leader connect/read timeout in seconds (default: 0.2)",
+        default=None,
+        help="override wireless.leader_timeout from the configuration, in seconds",
     )
     parser.add_argument(
         "--pair-browser-leader",
@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
         parser.error("--leader-url and --leader-token-file must be provided together")
     if not 1 <= args.leader_port <= 65535:
         parser.error("--leader-port must be between 1 and 65535")
-    if args.leader_timeout <= 0:
+    if args.leader_timeout is not None and args.leader_timeout <= 0:
         parser.error("--leader-timeout must be positive")
     return args
 
@@ -83,7 +83,7 @@ def run_web(
     port: int = 8000,
     leader_url: str | None = None,
     leader_token_file: str | Path | None = None,
-    leader_timeout: float = 0.2,
+    leader_timeout: float | None = None,
     browser_pair_leader: bool = False,
     leader_port: int = 8765,
     event_log_path: str | Path | None = None,
@@ -97,7 +97,8 @@ def run_web(
         port: HTTP port.
         leader_url: Explicit laptop service URL for the legacy remote workflow.
         leader_token_file: Shared token required by either remote workflow.
-        leader_timeout: Remote connect and sample timeout in seconds.
+        leader_timeout: Remote connect and sample timeout in seconds; when omitted,
+            ``wireless.leader_timeout`` from the configuration is used.
         browser_pair_leader: Derive the leader host from the operator HTTP request.
         leader_port: Laptop leader-service port used for browser pairing.
         event_log_path: Optional JSON Lines destination for session events.
@@ -117,6 +118,10 @@ def run_web(
     event_sink = None
     try:
         config = load_config(config_path)
+        if leader_timeout is None:
+            leader_timeout = config.wireless.leader_timeout
+        elif leader_timeout <= 0:
+            raise RemoteLeaderError("Remote leader timeout must be positive")
         if event_log_path is not None:
             event_sink = AsyncJsonlEventSink(event_log_path)
         browser_leader_factory = None

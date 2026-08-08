@@ -30,6 +30,14 @@ class RemoteLeaderError(RuntimeError):
     """Raised when the remote leader transport is unavailable or invalid."""
 
 
+class RemoteLeaderTimeout(RemoteLeaderError):
+    """Raised when one sample round trip exceeded the configured deadline.
+
+    This is the only remote-leader failure a caller may retry. Authentication,
+    protocol, validation, and closed-connection failures remain fatal.
+    """
+
+
 class _SyncConnection(Protocol):
     def send(self, message: str) -> None: ...
 
@@ -204,6 +212,9 @@ class RemoteLeader:
             return _decode_message(self._connection.recv(timeout=self.timeout))
         except RemoteLeaderError:
             raise
+        except TimeoutError as error:
+            # Only a deadline miss is retryable; every other failure stays fatal.
+            raise RemoteLeaderTimeout(f"Remote leader receive timed out: {error}") from error
         except Exception as error:
             raise RemoteLeaderError(f"Remote leader receive failed: {error}") from error
 

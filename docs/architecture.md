@@ -79,6 +79,11 @@ that request, and the response must contain the same sequence and all seven
 valid raw positions. There is no playback queue that can continue issuing old
 motions after network delay.
 
+A sample that misses its deadline raises `RemoteLeaderTimeout`, the only
+retryable remote-leader failure. The control and monitor loops skip that cycle
+rather than faulting, bounded by `wireless.leader_max_consecutive_timeouts`.
+Every other remote-leader failure remains immediately fatal.
+
 ## Controller state machine
 
 ```text
@@ -151,9 +156,17 @@ The following invariants must remain true during refactoring:
 4. Every physical sample is finite, contains exactly six joint targets plus
    one gripper command, and passes static and jump limits.
 5. SDK errors, warnings, non-motion states, transport failures, and worker
-   failures end the run and request a safe stop.
-6. Loss of the final telemetry browser requests a software stop; the hardware
-   emergency stop remains authoritative.
+   failures end the run and request a safe stop. A bounded burst of wireless
+   leader *timeouts* is the sole exception: up to
+   `wireless.leader_max_consecutive_timeouts` in a row skip the cycle without
+   commanding, and the next miss faults. No command is ever issued for a sample
+   that did not arrive, and configuration keeps the accumulated blind time below
+   `physical_xarm.watchdog_timeout`. Recovery slews toward the leader at
+   `catchup_step_degrees` per cycle; a jump on a healthy link still faults.
+   See [ADR 0003](decisions/0003-wireless-tolerance.md).
+6. Loss of the final telemetry browser requests a software stop after
+   `wireless.browser_grace_seconds`, which a reconnecting browser cancels; the
+   hardware emergency stop remains authoritative throughout.
 7. Authentication tokens remain outside the repository and owner-readable
    only. Plain `ws://` is used only on a trusted private network.
 
@@ -201,3 +214,4 @@ Accepted architecture decisions:
 
 - [ADR 0001: Keep MJPEG for private-LAN video](decisions/0001-video-transport.md)
 - [ADR 0002: Keep one robot per backend process](decisions/0002-one-robot-per-process.md)
+- [ADR 0003: Absorb bounded transient loss on wireless links](decisions/0003-wireless-tolerance.md)
