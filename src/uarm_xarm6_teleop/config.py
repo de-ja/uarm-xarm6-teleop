@@ -52,6 +52,20 @@ class SimulationConfig:
 
 
 @dataclass(frozen=True)
+class WirelessConfig:
+    """Define one shared tolerance policy for every wireless link.
+
+    The follower host depends on two wireless links: the leader sample link to
+    the laptop and the operator console's telemetry link to the browser. Both
+    absorb a bounded amount of transient loss before the run is faulted.
+    """
+
+    leader_timeout: float
+    leader_max_consecutive_timeouts: int
+    browser_grace_seconds: float
+
+
+@dataclass(frozen=True)
 class PhysicalXArmConfig:
     """Define physical xArm connection, motion limits, and watchdog settings."""
 
@@ -63,6 +77,8 @@ class PhysicalXArmConfig:
     startup_tolerance_degrees: float
     leader_start_tolerance_degrees: float
     max_target_jump_degrees: float
+    catchup_step_degrees: float
+    catchup_max_divergence_degrees: float
     watchdog_timeout: float
     joint_lower_degrees: tuple[float, ...]
     joint_upper_degrees: tuple[float, ...]
@@ -81,6 +97,7 @@ class TeleopConfig:
     leader: LeaderConfig
     xarm6: XArm6Config
     simulation: SimulationConfig
+    wireless: WirelessConfig
     physical_xarm: PhysicalXArmConfig
 
 
@@ -138,6 +155,13 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
         raise ValueError("xarm6.gripper_press_degrees must exceed gripper_release_degrees")
     if config.simulation.rate <= 0:
         raise ValueError("simulation.rate must be positive")
+    wireless = config.wireless
+    if wireless.leader_timeout <= 0:
+        raise ValueError("wireless.leader_timeout must be positive")
+    if wireless.leader_max_consecutive_timeouts < 0:
+        raise ValueError("wireless.leader_max_consecutive_timeouts cannot be negative")
+    if wireless.browser_grace_seconds < 0:
+        raise ValueError("wireless.browser_grace_seconds cannot be negative")
     physical = config.physical_xarm
     if physical.rate <= 0:
         raise ValueError("physical_xarm.rate must be positive")
@@ -149,6 +173,8 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
         "startup_tolerance_degrees": physical.startup_tolerance_degrees,
         "leader_start_tolerance_degrees": physical.leader_start_tolerance_degrees,
         "max_target_jump_degrees": physical.max_target_jump_degrees,
+        "catchup_step_degrees": physical.catchup_step_degrees,
+        "catchup_max_divergence_degrees": physical.catchup_max_divergence_degrees,
         "watchdog_timeout": physical.watchdog_timeout,
         "gripper_speed": physical.gripper_speed,
         "gripper_force": physical.gripper_force,
@@ -157,6 +183,19 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
     for name, value in positive_values.items():
         if value <= 0:
             raise ValueError(f"physical_xarm.{name} must be positive")
+    # A slewed catch-up target must always satisfy the per-sample jump limit,
+    # otherwise recovery would trip the very check it is meant to respect.
+    if physical.catchup_step_degrees > physical.max_target_jump_degrees:
+        raise ValueError("physical_xarm.catchup_step_degrees cannot exceed max_target_jump_degrees")
+    # The follower must fault before the robot-local watchdog trips, because a
+    # tripped watchdog cannot be cleared without restarting teleoperation.
+    blind_seconds = wireless.leader_timeout * (wireless.leader_max_consecutive_timeouts + 1)
+    if blind_seconds >= physical.watchdog_timeout:
+        raise ValueError(
+            f"wireless.leader_timeout x (leader_max_consecutive_timeouts + 1) = "
+            f"{blind_seconds:.3f}s must stay below physical_xarm.watchdog_timeout "
+            f"({physical.watchdog_timeout:.3f}s)"
+        )
     if len(physical.joint_lower_degrees) != 6 or len(physical.joint_upper_degrees) != 6:
         raise ValueError("physical_xarm joint limits must contain six values")
     if any(
@@ -200,13 +239,14 @@ def load_config(path: str | Path | None = None) -> TeleopConfig:
         with config_path.open("rb") as stream:
             override_data = tomllib.load(stream)
         data = {}
-        for name in ("serial", "leader", "xarm6", "simulation", "physical_xarm"):
+        for name in ("serial", "leader", "xarm6", "simulation", "wireless", "physical_xarm"):
             data[name] = {**_section(base_data, name), **_section(override_data, name)}
 
     serial = _section(data, "serial")
     leader = _section(data, "leader")
     xarm6 = _section(data, "xarm6")
     simulation = _section(data, "simulation")
+    wireless = _section(data, "wireless")
     physical_xarm = _section(data, "physical_xarm")
 
     config = TeleopConfig(
@@ -235,6 +275,11 @@ def load_config(path: str | Path | None = None) -> TeleopConfig:
             scene=str(simulation["scene"]),
             rate=float(simulation["rate"]),
         ),
+        wireless=WirelessConfig(
+            leader_timeout=float(wireless["leader_timeout"]),
+            leader_max_consecutive_timeouts=int(wireless["leader_max_consecutive_timeouts"]),
+            browser_grace_seconds=float(wireless["browser_grace_seconds"]),
+        ),
         physical_xarm=PhysicalXArmConfig(
             robot_ip=str(physical_xarm["robot_ip"]),
             rate=float(physical_xarm["rate"]),
@@ -244,6 +289,8 @@ def load_config(path: str | Path | None = None) -> TeleopConfig:
             startup_tolerance_degrees=float(physical_xarm["startup_tolerance_degrees"]),
             leader_start_tolerance_degrees=float(physical_xarm["leader_start_tolerance_degrees"]),
             max_target_jump_degrees=float(physical_xarm["max_target_jump_degrees"]),
+            catchup_step_degrees=float(physical_xarm["catchup_step_degrees"]),
+            catchup_max_divergence_degrees=float(physical_xarm["catchup_max_divergence_degrees"]),
             watchdog_timeout=float(physical_xarm["watchdog_timeout"]),
             joint_lower_degrees=tuple(
                 float(value) for value in physical_xarm["joint_lower_degrees"]

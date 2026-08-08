@@ -12,6 +12,7 @@ from uarm_xarm6_teleop.controller import (
     TeleopState,
 )
 from uarm_xarm6_teleop.feetech import LeaderSample
+from uarm_xarm6_teleop.remote_leader import RemoteLeaderTimeout
 
 
 class FakeLeader:
@@ -23,19 +24,32 @@ class FakeLeader:
         torque_ids=(),
         fail_event=None,
         step_radians=0.0,
+        timeout_event=None,
+        timeout_budget=0,
     ):
         self.torque_enabled_ids = torque_ids
         self.fail_event = fail_event
         self.step_radians = step_radians
+        self.timeout_event = timeout_event
+        self.timeouts_remaining = timeout_budget
         self.opened = False
         self.closed = False
         self.read_count = 0
+        self.timeout_count = 0
 
     def open(self):
         self.opened = True
 
     def read(self):
         self.read_count += 1
+        if (
+            self.timeout_event is not None
+            and self.timeout_event.is_set()
+            and self.timeouts_remaining > 0
+        ):
+            self.timeouts_remaining -= 1
+            self.timeout_count += 1
+            raise RemoteLeaderTimeout("timed out in 0.06s")
         if self.fail_event is not None and self.fail_event.is_set():
             raise OSError("leader sample failed")
         return LeaderSample(
@@ -56,10 +70,20 @@ class FakeFollower:
         self.closed = False
         self.commands = []
         self._gripper_contact_latched = False
+        self._catching_up = False
+        self.catch_up_calls = 0
 
     @property
     def gripper_contact_latched(self):
         return self._gripper_contact_latched
+
+    @property
+    def catching_up(self):
+        return self._catching_up
+
+    def begin_catch_up(self):
+        self.catch_up_calls += 1
+        self._catching_up = True
 
     def inspect(self):
         return XArmStatus(
@@ -135,6 +159,8 @@ class ControllerTests(unittest.TestCase):
         fail_event=None,
         step_radians=0.0,
         event_sink=None,
+        timeout_event=None,
+        timeout_budget=0,
     ):
         def leader_factory(serial, leader):
             fake = FakeLeader(
@@ -143,6 +169,8 @@ class ControllerTests(unittest.TestCase):
                 torque_ids=torque_ids,
                 fail_event=fail_event,
                 step_radians=step_radians,
+                timeout_event=timeout_event,
+                timeout_budget=timeout_budget,
             )
             self.leaders.append(fake)
             return fake
@@ -300,6 +328,87 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("leader sample failed", controller.snapshot().fault)
         controller.reset_fault()
         self.assertEqual(controller.state, TeleopState.IDLE)
+
+    def test_run_absorbs_tolerated_leader_timeouts(self):
+        # Three consecutive misses is exactly the configured budget.
+        timeout_event = threading.Event()
+        controller = self.make_controller(timeout_event=timeout_event, timeout_budget=3)
+        controller.connect_leader()
+        controller.start("dry_run")
+        self.wait_for_state(controller, TeleopState.RUNNING)
+        timeout_event.set()
+        self.wait_for(lambda: self.leaders[0].timeouts_remaining == 0, "the timeout burst")
+        sampled = self.leaders[0].read_count
+        self.wait_for(lambda: self.leaders[0].read_count > sampled, "recovery after the burst")
+
+        self.assertEqual(controller.state, TeleopState.RUNNING)
+        self.assertEqual(self.leaders[0].timeout_count, 3)
+        controller.stop()
+        self.assertEqual(controller.state, TeleopState.STOPPED)
+
+    def test_run_faults_once_the_timeout_budget_is_exceeded(self):
+        # One miss beyond the configured budget must end the run.
+        timeout_event = threading.Event()
+        controller = self.make_controller(timeout_event=timeout_event, timeout_budget=5)
+        controller.connect_leader()
+        controller.start("dry_run")
+        self.wait_for_state(controller, TeleopState.RUNNING)
+        timeout_event.set()
+        self.wait_for_state(controller, TeleopState.FAULT)
+        self.assertIn("timed out", controller.snapshot().fault)
+
+    def test_tolerated_timeouts_send_no_physical_command(self):
+        timeout_event = threading.Event()
+        controller = self.make_controller(timeout_event=timeout_event, timeout_budget=3)
+        controller.connect_leader()
+        controller.inspect_robot("192.0.2.8")
+        controller.start("physical", confirmation="192.0.2.8")
+        self.wait_for_state(controller, TeleopState.RUNNING)
+        self.wait_for(lambda: bool(self.followers[0].commands), "a follower command")
+
+        commanded = len(self.followers[0].commands)
+        timeout_event.set()
+        self.wait_for(lambda: self.leaders[0].timeouts_remaining == 0, "the timeout burst")
+        # No command may be issued for a sample that never arrived.
+        self.assertLessEqual(len(self.followers[0].commands), commanded + 1)
+
+        self.wait_for(
+            lambda: len(self.followers[0].commands) > commanded + 1,
+            "commands to resume after recovery",
+        )
+        self.assertEqual(controller.state, TeleopState.RUNNING)
+        controller.stop()
+        controller.close()
+
+    def test_recovery_puts_the_physical_follower_into_catch_up(self):
+        timeout_event = threading.Event()
+        controller = self.make_controller(timeout_event=timeout_event, timeout_budget=3)
+        controller.connect_leader()
+        controller.inspect_robot("192.0.2.8")
+        controller.start("physical", confirmation="192.0.2.8")
+        self.wait_for_state(controller, TeleopState.RUNNING)
+        self.wait_for(lambda: bool(self.followers[0].commands), "a follower command")
+
+        timeout_event.set()
+        self.wait_for(lambda: self.leaders[0].timeouts_remaining == 0, "the timeout burst")
+        self.wait_for(lambda: self.followers[0].catch_up_calls == 1, "catch-up to begin")
+
+        messages = [event.message for event in controller.snapshot().events]
+        self.assertTrue(any("slewing toward the leader" in message for message in messages))
+        controller.stop()
+        controller.close()
+
+    def test_catch_up_is_not_requested_without_a_gap(self):
+        controller = self.make_controller()
+        controller.connect_leader()
+        controller.inspect_robot("192.0.2.8")
+        controller.start("physical", confirmation="192.0.2.8")
+        self.wait_for_state(controller, TeleopState.RUNNING)
+        self.wait_for(lambda: len(self.followers[0].commands) > 3, "several follower commands")
+        controller.stop()
+
+        self.assertEqual(self.followers[0].catch_up_calls, 0)
+        controller.close()
 
     def test_monitor_failure_enters_fault_without_opening_robot(self):
         fail_event = threading.Event()

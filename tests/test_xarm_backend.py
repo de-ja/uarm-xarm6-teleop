@@ -113,6 +113,35 @@ class XArmBackendTests(unittest.TestCase):
         with self.assertRaisesRegex(XArmHardwareError, "jumped"):
             safety.validate(target)
 
+    def test_approach_clamps_a_large_gap_to_one_slew_step(self):
+        safety = TargetSafety(self.config)
+        safety.reset(self.reference)
+        target = self.reference.copy()
+        target[0] += np.deg2rad(40.0)
+
+        slewed = safety.approach(target, self.config.catchup_step_degrees)
+        moved = np.rad2deg(slewed[0] - self.reference[0])
+        self.assertAlmostEqual(moved, self.config.catchup_step_degrees, places=6)
+        # A slewed target must always survive the jump check it replaces.
+        safety.validate(slewed)
+
+    def test_approach_returns_the_target_once_it_is_within_one_step(self):
+        safety = TargetSafety(self.config)
+        safety.reset(self.reference)
+        target = self.reference.copy()
+        target[0] += np.deg2rad(1.0)
+
+        slewed = safety.approach(target, self.config.catchup_step_degrees)
+        np.testing.assert_allclose(slewed, target)
+
+    def test_divergence_reports_the_largest_joint_gap(self):
+        safety = TargetSafety(self.config)
+        self.assertEqual(safety.divergence_degrees(self.reference), 0.0)
+        safety.reset(self.reference)
+        target = self.reference.copy()
+        target[1] += np.deg2rad(30.0)
+        self.assertAlmostEqual(safety.divergence_degrees(target), 30.0, places=6)
+
     def test_inspection_never_enables_motion(self):
         backend, fake = self.make_backend()
         status = backend.inspect()
@@ -161,6 +190,53 @@ class XArmBackendTests(unittest.TestCase):
         self.assertEqual(gripper_call[2]["speed"], 50)
         self.assertEqual(gripper_call[2]["force"], 20)
         self.assertIn(("set_state", 4), fake.calls)
+
+    def test_catch_up_slews_toward_a_gap_and_then_tracks_normally(self):
+        backend, fake = self.make_backend()
+        backend.arm_motion(self.reference)
+        backend.command(np.concatenate([self.reference, [0.0]]), gripper_command_max=0.81)
+
+        # The leader moved 12 deg while the wireless link was blind.
+        target = self.reference.copy()
+        target[0] += np.deg2rad(12.0)
+        backend.begin_catch_up()
+        self.assertTrue(backend.catching_up)
+
+        commanded = []
+        for _ in range(6):
+            backend.command(np.concatenate([target, [0.0]]), gripper_command_max=0.81)
+            call = [c for c in fake.calls if c[0] == "set_servo_angle"][-1]
+            commanded.append(np.rad2deg(call[1]["angle"][0] - self.reference[0]))
+
+        steps = np.diff([0.0, *commanded])
+        self.assertTrue(np.all(steps <= self.config.catchup_step_degrees + 1e-6))
+        self.assertAlmostEqual(commanded[-1], 12.0, places=6)
+        self.assertFalse(backend.catching_up)
+        backend.close()
+
+    def test_catch_up_faults_when_the_leader_diverged_too_far(self):
+        backend, fake = self.make_backend()
+        backend.arm_motion(self.reference)
+        backend.command(np.concatenate([self.reference, [0.0]]), gripper_command_max=0.81)
+
+        target = self.reference.copy()
+        target[0] += np.deg2rad(60.0)
+        backend.begin_catch_up()
+        with self.assertRaisesRegex(XArmHardwareError, "diverged"):
+            backend.command(np.concatenate([target, [0.0]]), gripper_command_max=0.81)
+        backend.close()
+
+    def test_jump_without_a_gap_still_faults(self):
+        backend, fake = self.make_backend()
+        backend.arm_motion(self.reference)
+        backend.command(np.concatenate([self.reference, [0.0]]), gripper_command_max=0.81)
+
+        # No catch-up was requested, so a divergent sample is still a fault.
+        target = self.reference.copy()
+        target[0] += np.deg2rad(12.0)
+        with self.assertRaisesRegex(XArmHardwareError, "jumped"):
+            backend.command(np.concatenate([target, [0.0]]), gripper_command_max=0.81)
+        backend.close()
 
     def test_ready_feedback_state_accepts_commands(self):
         backend, fake = self.make_backend()

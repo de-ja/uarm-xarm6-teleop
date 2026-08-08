@@ -97,6 +97,38 @@ class TargetSafety:
                 )
         self._previous = target.copy()
 
+    def approach(self, target_radians: np.ndarray, max_step_degrees: float) -> np.ndarray:
+        """Return a target no further than one slew step from the previous target.
+
+        Args:
+            target_radians: Six desired xArm joint targets in radians.
+            max_step_degrees: Largest per-joint change permitted this cycle.
+
+        Returns:
+            The desired target itself before any target has been validated,
+            otherwise the previous target advanced toward it by at most one step.
+        """
+        target = np.asarray(target_radians, dtype=float)
+        if self._previous is None:
+            return target
+        step = np.deg2rad(max_step_degrees)
+        delta = np.clip(target - self._previous, -step, step)
+        return self._previous + delta
+
+    def divergence_degrees(self, target_radians: np.ndarray) -> float:
+        """Return the largest per-joint gap in degrees from the previous target.
+
+        Args:
+            target_radians: Six desired xArm joint targets in radians.
+
+        Returns:
+            Zero before any target has been validated, otherwise the gap.
+        """
+        if self._previous is None:
+            return 0.0
+        target = np.asarray(target_radians, dtype=float)
+        return float(np.max(np.abs(np.rad2deg(target - self._previous))))
+
 
 class XArm6Hardware:
     """Physical follower that remains read-only until :meth:`arm_motion` succeeds."""
@@ -123,6 +155,7 @@ class XArm6Hardware:
         self._lock = threading.RLock()
         self._armed = False
         self._watchdog_tripped = False
+        self._catching_up = False
         self._last_command_time = 0.0
         self._last_gripper_position: int | None = None
         self._gripper_contact_latched = False
@@ -226,6 +259,7 @@ class XArm6Hardware:
         with self._lock:
             self._armed = True
             self._watchdog_tripped = False
+            self._catching_up = False
             self._last_command_time = time.monotonic()
             self._last_gripper_position = status.gripper_position
             self._gripper_contact_latched = status.gripper_status == 2
@@ -270,6 +304,17 @@ class XArm6Hardware:
                 )
 
             joints = values[:6]
+            if self._catching_up:
+                divergence = self.safety.divergence_degrees(joints)
+                if divergence > self.config.catchup_max_divergence_degrees:
+                    raise XArmHardwareError(
+                        f"Leader diverged {divergence:.2f} deg during the link gap; limit is "
+                        f"{self.config.catchup_max_divergence_degrees:.2f} deg"
+                    )
+                slewed = self.safety.approach(joints, self.config.catchup_step_degrees)
+                # Catch-up ends once the slew no longer clips the desired target.
+                self._catching_up = not np.allclose(slewed, joints)
+                joints = slewed
             self.safety.validate(joints)
             code, at_limit = self.arm.is_joint_limit(joints.tolist(), is_radian=True)
             self._check_code("is_joint_limit", code)
@@ -336,6 +381,21 @@ class XArm6Hardware:
                 )
                 self._last_gripper_position = send_gripper_target
             self._last_command_time = time.monotonic()
+
+    @property
+    def catching_up(self) -> bool:
+        """Report whether the follower is still slewing toward the leader."""
+        with self._lock:
+            return self._catching_up
+
+    def begin_catch_up(self) -> None:
+        """Slew toward the leader instead of faulting on the next target jump.
+
+        Called after a tolerated wireless gap, during which the follower held its
+        last commanded target while the leader kept moving.
+        """
+        with self._lock:
+            self._catching_up = True
 
     @property
     def gripper_contact_latched(self) -> bool:

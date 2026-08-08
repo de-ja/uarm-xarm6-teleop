@@ -191,7 +191,10 @@ computer's IP, and SSH and internet access are not required. If multiple URLs
 are printed, use the one on the router network shared by both computers.
 
 Both commands use `~/.config/uarm/leader.token` by default. `uarm-station` also
-loads `~/.config/uarm/desktop.toml` automatically when it exists. Keep the
+loads `~/.config/uarm/desktop.toml` automatically when it exists. Set
+`[wireless]` there to tune the sample deadline, the retry budget, and the
+browser reconnect grace period, or pass `uarm-station --leader-timeout` for a
+single session. See [ADR 0003](docs/decisions/0003-wireless-tolerance.md). Keep the
 token out of Git and use this only on a trusted private router or hotspot.
 See the complete [wireless teleoperation guide](docs/wireless-teleop.md) for
 installation, token creation, firewall, safety, and troubleshooting details.

@@ -177,6 +177,28 @@ controller address:
 robot_ip = "192.168.1.XXX"
 ```
 
+The same file also tunes wireless tolerance. `wireless.leader_timeout` bounds
+each sample round trip, and a timed-out sample is retried rather than fatal:
+
+```toml
+[wireless]
+leader_timeout = 0.15
+leader_max_consecutive_timeouts = 4
+browser_grace_seconds = 2.0
+```
+
+Put both computers on the router's **5 GHz** band. It carries the leader link
+and the MJPEG camera streams with far less contention than 2.4 GHz, which is
+the band where camera traffic starves leader samples.
+
+Worst-case blind time is `leader_timeout x (leader_max_consecutive_timeouts + 1)`
+and must stay below `physical_xarm.watchdog_timeout`; configuration validation
+rejects any pair that does not. Raising `leader_timeout` past the watchdog
+window therefore does not help — the watchdog would trip first, and a tripped
+watchdog needs a teleoperation restart. Widen the miss budget instead of the
+per-attempt deadline. `uarm-station --leader-timeout` overrides the file for one
+session.
+
 The desktop's configured serial device is not opened in browser-paired mode.
 Both computers retain the default servo ID order from the base
 configuration, and the connection is rejected if those IDs differ.
@@ -312,6 +334,23 @@ The webpage does not open:
 - From the laptop, run
   `curl http://DESKTOP_PRIVATE_IP:8000/api/health`.
 - Check the desktop firewall rule.
+
+`Remote leader receive timed out` ends a run:
+
+- More than `wireless.leader_max_consecutive_timeouts` samples missed their
+  deadline back to back. Isolated misses are absorbed and logged as
+  `Leader sample timed out; retrying`, followed by `Leader link recovered`.
+- Run `uarm-station --event-log ~/.local/state/uarm/events.jsonl` and count
+  those warnings; frequent bursts mean the link is degraded, not mistuned.
+- Widen the budget with `wireless.leader_max_consecutive_timeouts`, keeping
+  the product below `physical_xarm.watchdog_timeout`.
+- After a tolerated gap the follower slews back to the leader rather than
+  faulting, logging `slewing toward the leader` then `caught up`. A gap larger
+  than `physical_xarm.catchup_max_divergence_degrees` is too far to chase and
+  ends the run instead.
+- If bursts persist, look for link contention rather than a tight bound:
+  camera MJPEG streams share the Wi-Fi link with leader samples, and the
+  laptop reads the U-ARM serial bus inside its event loop.
 
 The xArm is unreachable while Wi-Fi works:
 

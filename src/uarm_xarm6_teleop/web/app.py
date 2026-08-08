@@ -47,23 +47,62 @@ class CameraLatencyRequest(BaseModel):
 
 
 class TelemetryClients:
-    """Track browser supervision without coupling it to the hardware loop."""
+    """Own browser supervision and its reconnect tolerance.
 
-    def __init__(self, controller: TeleopController) -> None:
+    Losing the final telemetry client stops motion, but a short grace period
+    lets a reconnecting browser keep an active run. The pending stop runs as an
+    independent task so it survives cancellation of the disconnecting handler.
+
+    Args:
+        controller: Controller stopped when supervision is genuinely lost.
+        grace_seconds: Reconnect window; zero stops motion immediately.
+    """
+
+    def __init__(self, controller: TeleopController, grace_seconds: float = 0.0) -> None:
         self.controller = controller
+        self.grace_seconds = max(0.0, grace_seconds)
         self._lock = threading.Lock()
         self._count = 0
+        self._pending_stop: asyncio.Task[None] | None = None
 
     def connected(self) -> None:
-        """Register one telemetry WebSocket client."""
+        """Register one telemetry client and cancel any pending stop."""
         with self._lock:
             self._count += 1
+            pending, self._pending_stop = self._pending_stop, None
+        if pending is not None:
+            pending.cancel()
 
     def disconnected(self) -> bool:
         """Unregister a client and report whether supervision is now absent."""
         with self._lock:
             self._count = max(0, self._count - 1)
             return self._count == 0
+
+    @property
+    def supervised(self) -> bool:
+        """Report whether at least one telemetry client is currently attached."""
+        with self._lock:
+            return self._count > 0
+
+    def schedule_stop(self) -> None:
+        """Stop the controller after the grace period unless a client returns."""
+        task = asyncio.get_running_loop().create_task(self._stop_after_grace())
+        with self._lock:
+            self._pending_stop = task
+
+    async def _stop_after_grace(self) -> None:
+        try:
+            if self.grace_seconds:
+                await asyncio.sleep(self.grace_seconds)
+            if not self.supervised:
+                await asyncio.to_thread(self.controller.stop)
+        except asyncio.CancelledError:  # noqa: S110 - a reconnect cancels the stop
+            pass
+        finally:
+            with self._lock:
+                if self._pending_stop is asyncio.current_task():
+                    self._pending_stop = None
 
 
 def _invoke(operation: Callable[[], TeleopSnapshot]) -> dict[str, object]:
@@ -103,7 +142,10 @@ def create_app(
         capabilities=detect_runtime_capabilities(),
     )
     active_cameras = camera_manager or CameraManager()
-    telemetry_clients = TelemetryClients(active_controller)
+    telemetry_clients = TelemetryClients(
+        active_controller,
+        grace_seconds=active_controller.config.wireless.browser_grace_seconds,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -241,7 +283,7 @@ def create_app(
             receiver.cancel()
             await asyncio.gather(sender, receiver, return_exceptions=True)
             if telemetry_clients.disconnected():
-                await asyncio.to_thread(active_controller.stop)
+                telemetry_clients.schedule_stop()
 
     frontend_dist = Path(__file__).resolve().parent / "dist"
     if frontend_dist.is_dir():

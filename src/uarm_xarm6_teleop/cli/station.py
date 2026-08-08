@@ -112,6 +112,7 @@ def interactive_station(
     host: str = "0.0.0.0",
     port: int = 8000,
     leader_port: int = 8765,
+    leader_timeout: float | None = None,
     event_log_path: str | Path | None = None,
     input_fn: InputFunction = input,
     output: OutputFunction = print,
@@ -124,6 +125,7 @@ def interactive_station(
         host: HTTP bind address.
         port: HTTP console port.
         leader_port: Laptop WebSocket service port.
+        leader_timeout: Optional override for ``wireless.leader_timeout``, in seconds.
         event_log_path: Optional JSON Lines destination for session events.
         input_fn: Interactive input function, replaceable in tests.
         output: Interactive output function, replaceable in tests.
@@ -162,7 +164,7 @@ def interactive_station(
         host=host,
         port=port,
         leader_token_file=token_path,
-        leader_timeout=0.2,
+        leader_timeout=leader_timeout,
         browser_pair_leader=True,
         leader_port=leader_port,
         event_log_path=event_log_path,
@@ -178,6 +180,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="0.0.0.0", help="HTTP bind address")
     parser.add_argument("--port", type=int, default=8000, help="HTTP port")
     parser.add_argument("--leader-port", type=int, default=8765, help="laptop leader-service port")
+    parser.add_argument(
+        "--leader-timeout",
+        type=float,
+        default=None,
+        help="override wireless.leader_timeout from the configuration, in seconds",
+    )
     parser.add_argument("--event-log", help="optional JSON Lines controller event log")
     parser.add_argument("--diagnose", action="store_true", help="check local station setup")
     args = parser.parse_args()
@@ -185,6 +193,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--port must be between 1 and 65535")
     if not 1 <= args.leader_port <= 65535:
         parser.error("--leader-port must be between 1 and 65535")
+    if args.leader_timeout is not None and args.leader_timeout <= 0:
+        parser.error("--leader-timeout must be positive")
     if args.config is None and DEFAULT_CONFIG_PATH.exists():
         args.config = str(DEFAULT_CONFIG_PATH)
     return args
@@ -207,6 +217,7 @@ def main() -> None:
             host=args.host,
             port=args.port,
             leader_port=args.leader_port,
+            leader_timeout=args.leader_timeout,
             event_log_path=args.event_log,
         )
     except KeyboardInterrupt:

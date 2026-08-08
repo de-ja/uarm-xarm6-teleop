@@ -26,6 +26,18 @@ gripper_release_degrees = 4.0
 scene = "Empty-v1"
 rate = 30.0
 
+[wireless]
+# Shared tolerance policy for the leader link and the operator console link.
+# A leader sample slower than leader_timeout is retried rather than fatal, up to
+# leader_max_consecutive_timeouts in a row. Worst-case blind time is
+# leader_timeout x (leader_max_consecutive_timeouts + 1) and must stay below
+# physical_xarm.watchdog_timeout, which validation enforces.
+leader_timeout = 0.15
+leader_max_consecutive_timeouts = 4
+# Seconds to wait for a telemetry browser to reconnect before stopping motion.
+# Set to 0 to stop the moment the last console disconnects.
+browser_grace_seconds = 2.0
+
 [physical_xarm]
 # Leave blank in source control; pass --robot-ip or use a local override file.
 robot_ip = ""
@@ -36,7 +48,14 @@ joint_acceleration_degrees = 100.0
 startup_tolerance_degrees = 5.0
 leader_start_tolerance_degrees = 10.0
 max_target_jump_degrees = 10.0
-watchdog_timeout = 0.25
+# After a tolerated link gap the follower slews toward the leader at this rate
+# per control cycle instead of faulting on the jump limit. A divergence beyond
+# catchup_max_divergence_degrees is too far to chase safely and still faults.
+catchup_step_degrees = 3.0
+catchup_max_divergence_degrees = 45.0
+# Widened from 0.25 s so a tolerated wireless gap cannot trip the robot-local
+# guard. Must stay above the wireless blind time; validation enforces that.
+watchdog_timeout = 1.0
 joint_lower_degrees = [-360.0, -118.0, -217.7, -360.0, -97.0, -360.0]
 joint_upper_degrees = [360.0, 120.0, 11.0, 360.0, 180.0, 360.0]
 # xArm Gripper G2: position is opening width in mm; force range is 1-100.
