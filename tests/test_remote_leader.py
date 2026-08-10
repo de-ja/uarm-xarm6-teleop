@@ -16,6 +16,7 @@ from uarm_xarm6_teleop.remote_leader import (
     RemoteLeader,
     RemoteLeaderError,
     RemoteLeaderService,
+    RemoteLeaderTimeout,
     leader_url_for_host,
     load_token_file,
     normalize_leader_url,
@@ -24,9 +25,14 @@ from uarm_xarm6_teleop.remote_leader import (
 TOKEN = "test-token-with-at-least-thirty-two-characters"
 
 
+TIMEOUT = object()
+
+
 class FakeSyncConnection:
     def __init__(self, responses):
-        self.responses = deque(json.dumps(response) for response in responses)
+        self.responses = deque(
+            response if response is TIMEOUT else json.dumps(response) for response in responses
+        )
         self.sent = []
         self.closed = False
 
@@ -35,7 +41,10 @@ class FakeSyncConnection:
 
     def recv(self, timeout=None):
         del timeout
-        return self.responses.popleft()
+        response = self.responses.popleft()
+        if response is TIMEOUT:
+            raise TimeoutError("timed out in 0.15s")
+        return response
 
     def close(self):
         self.closed = True
@@ -125,6 +134,93 @@ class RemoteLeaderTests(unittest.TestCase):
         self.assertEqual(sample.timestamp, 123.25)
         np.testing.assert_allclose(sample.radians, np.zeros(7), atol=1e-12)
         self.assertTrue(connection.closed)
+
+    def test_late_reply_after_a_tolerated_timeout_is_discarded(self):
+        stale = [position + 1 for position in self.positions]
+        connection = FakeSyncConnection(
+            [
+                {
+                    "type": "hello",
+                    "protocol": 1,
+                    "ids": list(self.config.serial.ids),
+                    "torque_enabled_ids": [],
+                },
+                TIMEOUT,
+                # The abandoned request answers late, then the current one answers.
+                {"type": "sample", "sequence": 1, "positions": stale},
+                {"type": "sample", "sequence": 2, "positions": list(self.positions)},
+            ]
+        )
+        leader = RemoteLeader(
+            self.config.serial,
+            self.config.leader,
+            url="ws://leader:8765",
+            token=TOKEN,
+            connect_factory=lambda _url, **_kwargs: connection,
+        )
+        leader.open()
+
+        with self.assertRaises(RemoteLeaderTimeout):
+            leader.read()
+        sample = leader.read()
+
+        self.assertEqual(sample.positions, self.positions)
+        self.assertEqual([message["sequence"] for message in connection.sent[1:]], [1, 2])
+
+    def test_draining_stale_samples_respects_the_read_deadline(self):
+        clock = iter([0.0, 0.0, 10.0, 10.0, 10.0])
+        connection = FakeSyncConnection(
+            [
+                {
+                    "type": "hello",
+                    "protocol": 1,
+                    "ids": list(self.config.serial.ids),
+                    "torque_enabled_ids": [],
+                },
+                TIMEOUT,
+                {"type": "sample", "sequence": 1, "positions": list(self.positions)},
+                {"type": "sample", "sequence": 2, "positions": list(self.positions)},
+            ]
+        )
+        leader = RemoteLeader(
+            self.config.serial,
+            self.config.leader,
+            url="ws://leader:8765",
+            token=TOKEN,
+            monotonic=lambda: next(clock),
+            connect_factory=lambda _url, **_kwargs: connection,
+        )
+        leader.open()
+
+        with self.assertRaises(RemoteLeaderTimeout):
+            leader.read()
+        # The deadline elapses while the stale reply is being discarded.
+        with self.assertRaisesRegex(RemoteLeaderTimeout, "discarding a stale sample"):
+            leader.read()
+
+    def test_newer_than_requested_sequence_is_still_fatal(self):
+        connection = FakeSyncConnection(
+            [
+                {
+                    "type": "hello",
+                    "protocol": 1,
+                    "ids": list(self.config.serial.ids),
+                    "torque_enabled_ids": [],
+                },
+                {"type": "sample", "sequence": 9, "positions": list(self.positions)},
+            ]
+        )
+        leader = RemoteLeader(
+            self.config.serial,
+            self.config.leader,
+            url="ws://leader:8765",
+            token=TOKEN,
+            connect_factory=lambda _url, **_kwargs: connection,
+        )
+        leader.open()
+
+        with self.assertRaisesRegex(RemoteLeaderError, "unexpected sample sequence"):
+            leader.read()
 
     def test_remote_client_rejects_wrong_sequence(self):
         connection = FakeSyncConnection(
