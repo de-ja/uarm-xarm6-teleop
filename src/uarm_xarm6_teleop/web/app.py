@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from collections.abc import AsyncIterator, Callable
@@ -25,6 +26,8 @@ from ..controller import TeleopController, TeleopControllerError
 from ..feetech import FeetechError
 from ..protocol import RuntimeCapabilities, TeleopSnapshot
 from ..remote_leader import BrowserPairedRemoteLeaderFactory, RemoteLeaderError
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class RobotRequest(BaseModel):
@@ -64,6 +67,7 @@ class TelemetryClients:
         self._lock = threading.Lock()
         self._count = 0
         self._pending_stop: asyncio.Task[None] | None = None
+        self.stop_failure: str | None = None
 
     def connected(self) -> None:
         """Register one telemetry client and cancel any pending stop."""
@@ -96,9 +100,15 @@ class TelemetryClients:
             if self.grace_seconds:
                 await asyncio.sleep(self.grace_seconds)
             if not self.supervised:
+                self.stop_failure = None
                 await asyncio.to_thread(self.controller.stop)
         except asyncio.CancelledError:  # noqa: S110 - a reconnect cancels the stop
             pass
+        except Exception as error:  # noqa: BLE001 - detached task must report, not vanish
+            # Nothing awaits this task, so an unreported failure would leave
+            # motion running with no supervising browser and no visible cause.
+            self.stop_failure = str(error)
+            _LOGGER.exception("Supervision stop failed after the browser grace period")
         finally:
             with self._lock:
                 if self._pending_stop is asyncio.current_task():
