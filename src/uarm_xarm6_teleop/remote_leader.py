@@ -16,10 +16,10 @@ from typing import Any, Protocol, Self
 from urllib.parse import urlsplit, urlunsplit
 
 from .config import LeaderConfig, SerialConfig
-from .feetech import LeaderSample
+from .feetech import LeaderSample, LeaderTiming
 from .mapping import positions_to_radians
 
-REMOTE_LEADER_PROTOCOL = 1
+REMOTE_LEADER_PROTOCOL = 2
 REMOTE_LEADER_PATH = "/ws/leader"
 MAX_MESSAGE_BYTES = 4096
 MIN_TOKEN_LENGTH = 32
@@ -124,11 +124,34 @@ def _decode_message(raw: str | bytes) -> dict[str, object]:
     return decoded
 
 
+def _sample_timing(response: dict[str, object], round_trip_ms: float) -> LeaderTiming:
+    """Split one round trip into laptop serial time and derived network time.
+
+    Args:
+        response: Decoded sample reply, which may predate protocol 2.
+        round_trip_ms: Request-to-response time measured on the follower.
+
+    Returns:
+        Timing whose network component is None when the laptop reported no
+        read duration, since guessing it would be indistinguishable from zero.
+    """
+    reported = response.get("read_ms")
+    if not isinstance(reported, (int, float)) or isinstance(reported, bool):
+        return LeaderTiming(read_ms=0.0, round_trip_ms=round_trip_ms)
+    read_ms = float(reported)
+    return LeaderTiming(
+        read_ms=read_ms,
+        round_trip_ms=round_trip_ms,
+        network_ms=max(0.0, round_trip_ms - read_ms),
+    )
+
+
 def _positions_to_sample(
     positions: tuple[int, ...],
     leader: LeaderConfig,
     *,
     timestamp: float,
+    timing: LeaderTiming | None = None,
 ) -> LeaderSample:
     radians = positions_to_radians(positions, leader.midpoint, leader.directions)
     radians[6] = positions_to_radians(
@@ -136,7 +159,12 @@ def _positions_to_sample(
         leader.gripper_zero_position,
         [leader.directions[6]],
     )[0]
-    return LeaderSample(timestamp=timestamp, positions=positions, radians=radians)
+    return LeaderSample(
+        timestamp=timestamp,
+        positions=positions,
+        radians=radians,
+        timing=timing,
+    )
 
 
 def _is_stale_sample(response: dict[str, object], sequence: int) -> bool:
@@ -330,7 +358,13 @@ class RemoteLeader:
         ):
             raise RemoteLeaderError("Remote leader positions must be integers from 0 through 4095")
         positions = tuple(raw_positions)
-        return _positions_to_sample(positions, self.leader_config, timestamp=requested_at)
+        round_trip_ms = (self._monotonic() - requested_at) * 1000.0
+        return _positions_to_sample(
+            positions,
+            self.leader_config,
+            timestamp=requested_at,
+            timing=_sample_timing(response, round_trip_ms),
+        )
 
     def close(self) -> None:
         """Close the WebSocket connection and clear reported torque state."""
@@ -522,11 +556,15 @@ class RemoteLeaderService:
                     await self._reject(connection, "Invalid or stale sample request")
                     return
                 last_sequence = sequence
+                read_started_at = time.monotonic()
                 try:
                     positions = self.leader.read_positions()
                 except Exception as error:  # noqa: BLE001 - serial read boundary
                     await self._reject(connection, f"Leader read failed: {error}", code=1011)
                     return
+                # Measured on the laptop, so the follower can separate serial
+                # time from network time without the two clocks agreeing.
+                read_ms = (time.monotonic() - read_started_at) * 1000.0
                 if len(positions) != len(self.serial.ids) or not all(
                     isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 4096
                     for value in positions
@@ -542,6 +580,7 @@ class RemoteLeaderService:
                             "sequence": sequence,
                             "positions": list(positions),
                             "captured_at": time.time(),
+                            "read_ms": round(read_ms, 3),
                         },
                         separators=(",", ":"),
                     )

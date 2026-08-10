@@ -21,6 +21,16 @@ export interface HTTPValidationError {
   detail?: Array<ValidationError>;
 }
 
+export interface LatencyBreakdown {
+  leader_round_trip_ms: number | null;
+  leader_read_ms: number | null;
+  leader_network_ms: number | null;
+  mapping_ms: number | null;
+  robot_command_ms: number | null;
+  total_ms: number | null;
+  video_capture_lag_ms: number | null;
+}
+
 export interface RobotRequest {
   robot_ip: string;
 }
@@ -58,6 +68,7 @@ export interface TeleopSnapshot {
   loop_rate_hz: number;
   command_latency_ms: number | null;
   last_sample_age_ms: number | null;
+  latency: LatencyBreakdown | null;
   fault: string | null;
   events: Array<ControllerEvent>;
 }

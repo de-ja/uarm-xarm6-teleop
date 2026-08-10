@@ -103,6 +103,21 @@ class CameraCatalog:
                 discovered[node.resolve()] = capability
         return discovered
 
+    def newest_capture_monotonic(self) -> float | None:
+        """Return the newest frame capture time across active capture sessions.
+
+        Returns:
+            Capture time on this process's monotonic clock, or None when no
+            session currently holds a frame. Used to compare video freshness
+            against robot commands without involving the browser's clock.
+        """
+        with self.lock:
+            sessions = list(self.sessions.values())
+        captures = [
+            session.frame.captured_monotonic for session in sessions if session.frame is not None
+        ]
+        return max(captures) if captures else None
+
     def list_cameras(self) -> tuple[CameraInfo, ...]:
         """Return deduplicated capture devices, preferring stable symlinks."""
         capabilities = self._capabilities()
@@ -189,6 +204,7 @@ class CameraFrame:
     jpeg: bytes
     captured_at: float
     jpeg_quality: int
+    captured_monotonic: float = 0.0
 
 
 class AdaptiveJpegQuality:
@@ -269,6 +285,7 @@ class _CameraSession:
         capture_factory: Callable[[str], _VideoCapture],
         frame_encoder: Callable[[object, int], bytes],
         wall_time: Callable[[], float],
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.camera = camera
         self.width = width
@@ -278,6 +295,7 @@ class _CameraSession:
         self.capture_factory = capture_factory
         self.frame_encoder = frame_encoder
         self.wall_time = wall_time
+        self.monotonic = monotonic
         self.condition = threading.Condition()
         self.stop_event = threading.Event()
         self.frame: CameraFrame | None = None
@@ -310,10 +328,11 @@ class _CameraSession:
                     continue
                 failed_reads = 0
                 captured_at = self.wall_time()
+                captured_monotonic = self.monotonic()
                 jpeg_quality = self.quality.quality
                 encoded = self.frame_encoder(raw_frame, jpeg_quality)
                 with self.condition:
-                    self.frame = CameraFrame(encoded, captured_at, jpeg_quality)
+                    self.frame = CameraFrame(encoded, captured_at, jpeg_quality, captured_monotonic)
                     self.sequence += 1
                     self.condition.notify_all()
         except (CameraError, OSError, RuntimeError, ValueError) as error:
@@ -408,6 +427,7 @@ class CameraManager:
         capture_factory: Optional capture factory used for testing or alternate sources.
         frame_encoder: Optional JPEG encoder.
         wall_time: Clock used to timestamp frames for browser latency measurement.
+        monotonic: Clock used to compare video freshness with robot commands.
     """
 
     def __init__(
@@ -424,6 +444,7 @@ class CameraManager:
         capture_factory: Callable[[str], _VideoCapture] | None = None,
         frame_encoder: Callable[[object, int], bytes] | None = None,
         wall_time: Callable[[], float] = time.time,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.catalog = catalog or CameraCatalog()
         self.width = width
@@ -436,6 +457,7 @@ class CameraManager:
         self.capture_factory = capture_factory or self._open_capture
         self.frame_encoder = frame_encoder or self._encode_frame
         self.wall_time = wall_time
+        self.monotonic = monotonic
         self.lock = threading.Lock()
         self.sessions: dict[str, _CameraSession] = {}
 
@@ -461,6 +483,21 @@ class CameraManager:
         if not ok:
             raise CameraError("Could not encode camera frame")
         return encoded.tobytes()
+
+    def newest_capture_monotonic(self) -> float | None:
+        """Return the newest frame capture time across active capture sessions.
+
+        Returns:
+            Capture time on this process's monotonic clock, or None when no
+            session currently holds a frame. Used to compare video freshness
+            against robot commands without involving the browser's clock.
+        """
+        with self.lock:
+            sessions = list(self.sessions.values())
+        captures = [
+            session.frame.captured_monotonic for session in sessions if session.frame is not None
+        ]
+        return max(captures) if captures else None
 
     def list_cameras(self) -> tuple[CameraInfo, ...]:
         """Return the cameras currently offered to the operator console."""
@@ -497,6 +534,7 @@ class CameraManager:
                     self.capture_factory,
                     self.frame_encoder,
                     self.wall_time,
+                    self.monotonic,
                 )
                 self.sessions[camera_id] = session
                 session.start()

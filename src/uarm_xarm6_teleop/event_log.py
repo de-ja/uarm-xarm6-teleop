@@ -11,14 +11,17 @@ from typing import Protocol
 
 from .protocol import ControllerEvent
 
-EVENT_LOG_SCHEMA_VERSION = 1
+EVENT_LOG_SCHEMA_VERSION = 2
 
 
 class EventSink(Protocol):
-    """Accept controller events without performing work in the caller thread."""
+    """Accept controller records without performing work in the caller thread."""
 
     def emit(self, session_id: str, event: ControllerEvent) -> None:
         """Queue one controller event for external persistence."""
+
+    def emit_metrics(self, session_id: str, metrics: dict[str, object]) -> None:
+        """Queue one periodic metrics sample for external persistence."""
 
     def close(self) -> None:
         """Flush queued records and release sink resources."""
@@ -80,13 +83,34 @@ class AsyncJsonlEventSink:
 
     def emit(self, session_id: str, event: ControllerEvent) -> None:
         """Queue one serializable controller event without blocking."""
-        record: dict[str, object] = {
-            "schema_version": EVENT_LOG_SCHEMA_VERSION,
-            "session_id": session_id,
-            "timestamp": event.timestamp,
-            "level": event.level,
-            "message": event.message,
-        }
+        self._put(
+            {
+                "schema_version": EVENT_LOG_SCHEMA_VERSION,
+                "record": "event",
+                "session_id": session_id,
+                "timestamp": event.timestamp,
+                "level": event.level,
+                "message": event.message,
+            }
+        )
+
+    def emit_metrics(self, session_id: str, metrics: dict[str, object]) -> None:
+        """Queue one periodic metrics sample without blocking.
+
+        Args:
+            session_id: Session the sample belongs to.
+            metrics: Already serializable measurements, including a timestamp.
+        """
+        self._put(
+            {
+                "schema_version": EVENT_LOG_SCHEMA_VERSION,
+                "record": "metrics",
+                "session_id": session_id,
+                **metrics,
+            }
+        )
+
+    def _put(self, record: dict[str, object]) -> None:
         with self._lock:
             if self._closed:
                 return

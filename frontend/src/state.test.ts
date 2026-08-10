@@ -4,7 +4,7 @@ import type { TeleopSnapshot } from "./types";
 
 function snapshot(overrides: Partial<TeleopSnapshot>): TeleopSnapshot {
   return {
-    protocol_version: 3,
+    protocol_version: 4,
     session_id: "test-session",
     capabilities: {
       leader_transport: "local",
@@ -29,6 +29,7 @@ function snapshot(overrides: Partial<TeleopSnapshot>): TeleopSnapshot {
     loop_rate_hz: 0,
     command_latency_ms: null,
     last_sample_age_ms: null,
+    latency: null,
     fault: null,
     events: [],
     ...overrides,

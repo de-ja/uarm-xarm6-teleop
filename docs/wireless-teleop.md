@@ -237,8 +237,10 @@ The station automatically loads `~/.config/uarm/desktop.toml` when present,
 binds the console to the desktop's network interfaces, and prints the LAN URLs
 that can be opened from the laptop. It does not ask for the laptop IP.
 
-The default remote-leader timeout is 200 ms. Do not increase it beyond the
-physical xArm watchdog timeout without reviewing the fail-safe behavior.
+The default remote-leader timeout is 150 ms with a budget of four tolerated
+misses. Configuration validation keeps the resulting blind time below the
+physical xArm watchdog timeout, so an unsafe pair is rejected at startup rather
+than discovered during a run.
 
 ## 7. Connect from the laptop browser
 
@@ -344,6 +346,10 @@ The webpage does not open:
   those warnings; frequent bursts mean the link is degraded, not mistuned.
 - Widen the budget with `wireless.leader_max_consecutive_timeouts`, keeping
   the product below `physical_xarm.watchdog_timeout`.
+- Read the numbers, not just the messages. Each metrics record carries
+  `leader_network_ms` (Wi-Fi transit) and `leader_read_ms` (U-ARM serial), so a
+  slow link and a slow bus are distinguishable. Widen the budget only when
+  `leader_network_ms` is the large term.
 - After a tolerated gap the follower slews back to the leader rather than
   faulting, logging `slewing toward the leader` then `caught up`. A gap larger
   than `physical_xarm.catchup_max_divergence_degrees` is too far to chase and

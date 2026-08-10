@@ -37,6 +37,10 @@ class StubController:
         self.current_state = "idle"
         self.stop_calls = 0
         self.closed = False
+        self.video_clock = None
+
+    def set_video_clock(self, source):
+        self.video_clock = source
 
     def snapshot(self):
         return TeleopSnapshot(
@@ -57,6 +61,7 @@ class StubController:
             loop_rate_hz=0.0,
             command_latency_ms=None,
             last_sample_age_ms=None,
+            latency=None,
             fault=None,
             events=(ControllerEvent(100.0, "info", "test controller"),),
         )

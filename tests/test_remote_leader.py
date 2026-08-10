@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from collections import deque
+from itertools import chain, repeat
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ import numpy as np
 from uarm_xarm6_teleop.config import load_config
 from uarm_xarm6_teleop.remote_leader import (
     REMOTE_LEADER_PATH,
+    REMOTE_LEADER_PROTOCOL,
     BrowserPairedRemoteLeaderFactory,
     RemoteLeader,
     RemoteLeaderError,
@@ -99,7 +101,7 @@ class RemoteLeaderTests(unittest.TestCase):
             [
                 {
                     "type": "hello",
-                    "protocol": 1,
+                    "protocol": REMOTE_LEADER_PROTOCOL,
                     "ids": list(self.config.serial.ids),
                     "torque_enabled_ids": [3],
                 },
@@ -135,13 +137,71 @@ class RemoteLeaderTests(unittest.TestCase):
         np.testing.assert_allclose(sample.radians, np.zeros(7), atol=1e-12)
         self.assertTrue(connection.closed)
 
+    def test_reported_serial_time_splits_the_round_trip(self):
+        clock = chain([0.0], repeat(0.030))
+        connection = FakeSyncConnection(
+            [
+                {
+                    "type": "hello",
+                    "protocol": REMOTE_LEADER_PROTOCOL,
+                    "ids": list(self.config.serial.ids),
+                    "torque_enabled_ids": [],
+                },
+                {
+                    "type": "sample",
+                    "sequence": 1,
+                    "positions": list(self.positions),
+                    "read_ms": 12.0,
+                },
+            ]
+        )
+        leader = RemoteLeader(
+            self.config.serial,
+            self.config.leader,
+            url="ws://leader:8765",
+            token=TOKEN,
+            monotonic=lambda: next(clock),
+            connect_factory=lambda _url, **_kwargs: connection,
+        )
+        leader.open()
+        sample = leader.read()
+
+        self.assertAlmostEqual(sample.timing.round_trip_ms, 30.0, places=6)
+        self.assertAlmostEqual(sample.timing.read_ms, 12.0, places=6)
+        self.assertAlmostEqual(sample.timing.network_ms, 18.0, places=6)
+
+    def test_leader_without_reported_serial_time_leaves_network_unknown(self):
+        connection = FakeSyncConnection(
+            [
+                {
+                    "type": "hello",
+                    "protocol": REMOTE_LEADER_PROTOCOL,
+                    "ids": list(self.config.serial.ids),
+                    "torque_enabled_ids": [],
+                },
+                {"type": "sample", "sequence": 1, "positions": list(self.positions)},
+            ]
+        )
+        leader = RemoteLeader(
+            self.config.serial,
+            self.config.leader,
+            url="ws://leader:8765",
+            token=TOKEN,
+            connect_factory=lambda _url, **_kwargs: connection,
+        )
+        leader.open()
+        sample = leader.read()
+
+        self.assertIsNotNone(sample.timing.round_trip_ms)
+        self.assertIsNone(sample.timing.network_ms)
+
     def test_late_reply_after_a_tolerated_timeout_is_discarded(self):
         stale = [position + 1 for position in self.positions]
         connection = FakeSyncConnection(
             [
                 {
                     "type": "hello",
-                    "protocol": 1,
+                    "protocol": REMOTE_LEADER_PROTOCOL,
                     "ids": list(self.config.serial.ids),
                     "torque_enabled_ids": [],
                 },
@@ -168,12 +228,12 @@ class RemoteLeaderTests(unittest.TestCase):
         self.assertEqual([message["sequence"] for message in connection.sent[1:]], [1, 2])
 
     def test_draining_stale_samples_respects_the_read_deadline(self):
-        clock = iter([0.0, 0.0, 10.0, 10.0, 10.0])
+        clock = chain([0.0, 0.0], repeat(10.0))
         connection = FakeSyncConnection(
             [
                 {
                     "type": "hello",
-                    "protocol": 1,
+                    "protocol": REMOTE_LEADER_PROTOCOL,
                     "ids": list(self.config.serial.ids),
                     "torque_enabled_ids": [],
                 },
@@ -203,7 +263,7 @@ class RemoteLeaderTests(unittest.TestCase):
             [
                 {
                     "type": "hello",
-                    "protocol": 1,
+                    "protocol": REMOTE_LEADER_PROTOCOL,
                     "ids": list(self.config.serial.ids),
                     "torque_enabled_ids": [],
                 },
@@ -227,7 +287,7 @@ class RemoteLeaderTests(unittest.TestCase):
             [
                 {
                     "type": "hello",
-                    "protocol": 1,
+                    "protocol": REMOTE_LEADER_PROTOCOL,
                     "ids": list(self.config.serial.ids),
                     "torque_enabled_ids": [],
                 },
@@ -298,7 +358,7 @@ class RemoteLeaderServiceTests(unittest.IsolatedAsyncioTestCase):
             [
                 {
                     "type": "hello",
-                    "protocol": 1,
+                    "protocol": REMOTE_LEADER_PROTOCOL,
                     "token": TOKEN,
                     "ids": list(self.config.serial.ids),
                 },
@@ -323,7 +383,7 @@ class RemoteLeaderServiceTests(unittest.IsolatedAsyncioTestCase):
             [
                 {
                     "type": "hello",
-                    "protocol": 1,
+                    "protocol": REMOTE_LEADER_PROTOCOL,
                     "token": "wrong-token-that-is-still-long-enough-for-test",
                     "ids": list(self.config.serial.ids),
                 }

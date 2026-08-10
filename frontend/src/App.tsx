@@ -54,6 +54,10 @@ function ago(timestamp: number) {
   });
 }
 
+function formatMs(value: number | null | undefined) {
+  return value == null ? "—" : `${value.toFixed(1)} ms`;
+}
+
 function Metric({ label, value, good = true }: { label: string; value: string; good?: boolean }) {
   return (
     <div className="metric">
@@ -509,6 +513,18 @@ export function App() {
                 label="Leader to xArm"
                 value={snapshot.command_latency_ms === null ? "—" : `${snapshot.command_latency_ms.toFixed(1)} ms`}
                 good={snapshot.command_latency_ms === null || snapshot.command_latency_ms < 50}
+              />
+              <Metric label="  ├ Wi-Fi transit" value={formatMs(snapshot.latency?.leader_network_ms)} />
+              <Metric label="  ├ Leader serial" value={formatMs(snapshot.latency?.leader_read_ms)} />
+              <Metric label="  ├ Mapping" value={formatMs(snapshot.latency?.mapping_ms)} />
+              <Metric label="  └ xArm command" value={formatMs(snapshot.latency?.robot_command_ms)} />
+              <Metric
+                label="Video behind robot"
+                value={formatMs(snapshot.latency?.video_capture_lag_ms)}
+                good={
+                  snapshot.latency?.video_capture_lag_ms == null ||
+                  snapshot.latency.video_capture_lag_ms < 150
+                }
               />
               <Metric label="xArm mode / state" value={snapshot.robot_status ? `${snapshot.robot_status.mode} / ${snapshot.robot_status.state}` : "—"} />
               <Metric label="Error / warning" value={snapshot.robot_status ? `${snapshot.robot_status.error_code} / ${snapshot.robot_status.warning_code}` : "—"} good={!snapshot.robot_status || (!snapshot.robot_status.error_code && !snapshot.robot_status.warning_code)} />

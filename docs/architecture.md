@@ -139,10 +139,19 @@ The scheduler does not know about leaders, robots, modes, or safety. This keeps
 timing reusable while transition and arming policy remains centralized in
 `TeleopController`.
 
-When configured with `--event-log`, the controller sends versioned events to a
-bounded queue. A dedicated writer thread appends owner-only JSON Lines records.
-Control and monitor threads never wait for disk I/O; a saturated queue drops
-records rather than delaying a physical command.
+Latency is attributed per stage rather than reported as one number. The laptop
+measures its own serial read and returns it with each sample, so the follower
+derives network transit as the remainder of the round trip; mapping and xArm
+command time are measured locally. Video freshness is compared against the last
+robot command using only this host's clock. No stage depends on the laptop and
+follower clocks agreeing, which is why the browser-side camera figure is
+reported separately and treated as an estimate.
+
+When configured with `--event-log`, the controller sends versioned events and
+periodic metrics samples to a bounded queue. A dedicated writer thread appends
+owner-only JSON Lines records tagged `event` or `metrics`. Control and monitor
+threads never wait for disk I/O; a saturated queue drops records rather than
+delaying a physical command.
 
 ## Safety invariants
 
