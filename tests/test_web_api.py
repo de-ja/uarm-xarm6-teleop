@@ -268,6 +268,27 @@ class WebApiTests(unittest.TestCase):
         asyncio.run(scenario())
         self.assertEqual(self.controller.stop_calls, 1)
 
+    def test_failed_supervision_stop_is_recorded_not_swallowed(self):
+        def failing_stop():
+            self.controller.stop_calls += 1
+            raise RuntimeError("stop failed")
+
+        self.controller.stop = failing_stop
+
+        async def scenario():
+            clients = TelemetryClients(self.controller, grace_seconds=0.01)
+            clients.connected()
+            self.assertTrue(clients.disconnected())
+            clients.schedule_stop()
+            await asyncio.sleep(0.2)
+            return clients
+
+        with self.assertLogs("uarm_xarm6_teleop.web.app", level="ERROR"):
+            clients = asyncio.run(scenario())
+
+        self.assertEqual(self.controller.stop_calls, 1)
+        self.assertEqual(clients.stop_failure, "stop failed")
+
     def test_zero_grace_stops_motion_immediately(self):
         self.controller.current_state = "running"
 

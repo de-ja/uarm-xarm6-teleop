@@ -139,6 +139,24 @@ def _positions_to_sample(
     return LeaderSample(timestamp=timestamp, positions=positions, radians=radians)
 
 
+def _is_stale_sample(response: dict[str, object], sequence: int) -> bool:
+    """Report whether a response answers an earlier, already abandoned request.
+
+    Args:
+        response: Decoded message from the leader service.
+        sequence: Sequence number of the request currently outstanding.
+
+    Returns:
+        Whether this is a sample reply older than the outstanding request.
+    """
+    if response.get("type") != "sample":
+        return False
+    replied_to = response.get("sequence")
+    if not isinstance(replied_to, int) or isinstance(replied_to, bool):
+        return False
+    return replied_to < sequence
+
+
 class RemoteLeader:
     """Provide synchronous leader reads through a laptop WebSocket service.
 
@@ -205,11 +223,11 @@ class RemoteLeader:
         except Exception as error:
             raise RemoteLeaderError(f"Could not connect to {self.url}: {error}") from error
 
-    def _receive(self) -> dict[str, object]:
+    def _receive(self, timeout: float | None = None) -> dict[str, object]:
         if self._connection is None:
             raise RemoteLeaderError("Remote leader is not connected")
         try:
-            return _decode_message(self._connection.recv(timeout=self.timeout))
+            return _decode_message(self._connection.recv(timeout=timeout or self.timeout))
         except RemoteLeaderError:
             raise
         except TimeoutError as error:
@@ -285,7 +303,20 @@ class RemoteLeader:
             )
         except Exception as error:
             raise RemoteLeaderError(f"Remote leader send failed: {error}") from error
+        # One read never blocks longer than the configured deadline, including
+        # any draining, because the controller's blind-time budget assumes it.
+        deadline = requested_at + self.timeout
         response = self._receive()
+        while _is_stale_sample(response, sequence):
+            # A tolerated timeout leaves its reply in flight. Sequences are
+            # monotonic, so anything older than this request is stale by
+            # definition and must be discarded to resynchronise the link.
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                raise RemoteLeaderTimeout(
+                    "Remote leader receive timed out while discarding a stale sample"
+                )
+            response = self._receive(remaining)
         if response.get("type") == "error":
             raise RemoteLeaderError(str(response.get("message", "Remote leader read failed")))
         if response.get("type") != "sample" or response.get("sequence") != sequence:
