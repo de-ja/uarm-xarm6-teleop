@@ -1,6 +1,7 @@
 import threading
 import time
 import unittest
+from dataclasses import replace
 
 import numpy as np
 
@@ -446,6 +447,46 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("leader sample failed", snapshot.fault)
         self.assertEqual(self.followers, [])
         controller.reset_fault()
+
+    def test_a_loop_running_below_its_configured_rate_is_reported(self):
+        # In servo mode the loop rate is what turns a per-sample jump limit into
+        # a velocity limit, so a silent shortfall has no other visible symptom.
+        # The fakes run a cycle in microseconds, so the configured rate has to be
+        # far beyond any achievable one to make the shortfall deterministic.
+        self.config = replace(
+            self.config, physical_xarm=replace(self.config.physical_xarm, rate=1_000_000.0)
+        )
+        sink = FakeEventSink()
+        controller = self.make_controller(event_sink=sink)
+        controller.connect_leader()
+        controller.inspect_robot("192.0.2.8")
+        controller.start("physical", confirmation="192.0.2.8")
+        self.wait_for_state(controller, TeleopState.RUNNING)
+        self.wait_for(
+            lambda: any("Control loop is running" in record.message for _, record in sink.records),
+            "a slow loop warning",
+            timeout=3.0,
+        )
+        controller.stop()
+        controller.close()
+
+        warnings = [r for _, r in sink.records if "Control loop is running" in r.message]
+        self.assertEqual(warnings[0].level, "warning")
+        # Reported once on entry, not once per cycle.
+        self.assertEqual(len(warnings), 1)
+
+    def test_a_loop_meeting_its_rate_reports_nothing(self):
+        sink = FakeEventSink()
+        controller = self.make_controller(event_sink=sink)
+        controller.connect_leader()
+        controller.inspect_robot("192.0.2.8")
+        controller.start("physical", confirmation="192.0.2.8")
+        self.wait_for_state(controller, TeleopState.RUNNING)
+        self.wait_for(lambda: bool(sink.metrics), "a metrics sample")
+        controller.stop()
+        controller.close()
+
+        self.assertFalse([r for _, r in sink.records if "Control loop is running" in r.message])
 
 
 if __name__ == "__main__":

@@ -470,12 +470,13 @@ class AccelerationLimitTests(unittest.TestCase):
         # A deg/s^2 over one 1/rate cycle changes the step by A / rate^2 degrees.
         self.max_change = self.config.joint_acceleration_degrees / self.config.rate**2
 
-    def feed(self, safety, steps_degrees):
+    def feed(self, safety, steps_degrees, elapsed=None):
         """Drive the limiter with a sequence of per-sample raw leader steps on J1.
 
         Mirrors the production order: the raw target is validated, then the
         commanded stream is shaped.
         """
+        period = 1.0 / self.config.rate if elapsed is None else elapsed
         safety.reset(self.reference)
         applied = []
         raw = self.reference.copy()
@@ -483,7 +484,7 @@ class AccelerationLimitTests(unittest.TestCase):
             raw = raw.copy()
             raw[0] += np.deg2rad(step)
             safety.validate(raw)
-            limited = safety.limit_acceleration(raw)
+            limited = safety.limit_acceleration(raw, period)
             applied.append(float(np.rad2deg(limited[0] - self.reference[0])))
         return applied
 
@@ -539,6 +540,34 @@ class AccelerationLimitTests(unittest.TestCase):
 
         sent = [c for c in fake.calls if c[0] == "set_servo_angle"][-1]
         self.assertAlmostEqual(np.rad2deg(sent[1]["angle"][0]), np.rad2deg(target[0]), places=6)
+
+    def test_a_late_cycle_is_granted_the_budget_it_had_time_for(self):
+        # Twice the period is twice the acceleration budget, so the commanded
+        # step grows by 4x: the budget doubles and it applies over twice as long.
+        nominal = TargetSafety(self.config)
+        late = TargetSafety(self.config)
+        period = 1.0 / self.config.rate
+        on_time = self.feed(nominal, [0.0, 1.4], elapsed=period)
+        delayed = self.feed(late, [0.0, 1.4], elapsed=2 * period)
+        self.assertAlmostEqual(delayed[1], on_time[1] * 4.0, places=6)
+
+    def test_a_long_stall_cannot_bank_unlimited_budget(self):
+        # A cycle 100x late is credited only the capped number of periods, so a
+        # stalled loop cannot release a huge step when it resumes.
+        safety = TargetSafety(self.config)
+        period = 1.0 / self.config.rate
+        stalled = self.feed(safety, [0.0, 1.4], elapsed=100 * period)
+        capped = self.feed(TargetSafety(self.config), [0.0, 1.4], elapsed=4 * period)
+        self.assertAlmostEqual(stalled[1], capped[1], places=9)
+
+    def test_jitter_below_the_period_does_not_shrink_the_budget(self):
+        # Crediting less than a nominal period would make the arm sluggish for
+        # no safety gain, so short cycles are floored at the period.
+        safety = TargetSafety(self.config)
+        period = 1.0 / self.config.rate
+        short = self.feed(safety, [0.0, 1.4], elapsed=period / 10)
+        nominal = self.feed(TargetSafety(self.config), [0.0, 1.4], elapsed=period)
+        self.assertAlmostEqual(short[1], nominal[1], places=9)
 
 
 if __name__ == "__main__":

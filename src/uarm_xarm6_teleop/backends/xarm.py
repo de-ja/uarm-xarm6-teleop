@@ -19,6 +19,11 @@ class XArmHardwareError(RuntimeError):
     """Raised when a physical command cannot be proven safe to send."""
 
 
+# A stalled loop must not bank acceleration budget and release it at once, so
+# the measured cycle time is credited only up to this many nominal periods.
+_MAX_ACCELERATION_PERIODS = 4.0
+
+
 def _check_code(operation: str, code: int) -> None:
     """Raise when an SDK call reports a non-zero status code.
 
@@ -159,7 +164,7 @@ class TargetSafety:
         self.config = config
         self._previous: np.ndarray | None = None
         self._commanded: np.ndarray | None = None
-        self._commanded_delta: np.ndarray | None = None
+        self._commanded_velocity: np.ndarray | None = None
 
     def reset(self, target_radians: np.ndarray | None = None) -> None:
         """Clear jump history and optionally validate a new baseline target.
@@ -169,17 +174,17 @@ class TargetSafety:
         """
         self._previous = None
         self._commanded = None
-        self._commanded_delta = None
+        self._commanded_velocity = None
         if target_radians is not None:
             self.validate(target_radians, check_jump=False)
 
-    def limit_acceleration(self, target_radians: np.ndarray) -> np.ndarray:
-        """Bound how fast the commanded step may change, in place of mvacc.
+    def limit_acceleration(self, target_radians: np.ndarray, elapsed_seconds: float) -> np.ndarray:
+        """Bound how fast commanded joint velocity may change, in place of mvacc.
 
         The jump limit caps velocity but permits reversing it between one sample
         and the next, which is a large acceleration that check cannot see. This
-        clamps the change in step size instead, so joint velocity ramps rather
-        than stepping.
+        clamps the change in velocity instead, so joint speed ramps rather than
+        stepping.
 
         It deliberately does not plan an arrival. Unlike the controller's own
         planner it never decelerates toward the target, so closely spaced targets
@@ -192,26 +197,35 @@ class TargetSafety:
 
         Args:
             target_radians: Six validated xArm joint targets in radians.
+            elapsed_seconds: Measured time since the previous command. The budget
+                is proportional to it, so a late cycle is granted the
+                acceleration it genuinely had time for.
 
         Returns:
             The target itself on the first call, otherwise the target clamped to
-            one acceleration step away from the previous commanded velocity.
+            one acceleration budget away from the current commanded velocity.
         """
         target = np.asarray(target_radians, dtype=float)
-        if self._commanded is None or self._commanded_delta is None:
+        if self._commanded is None or self._commanded_velocity is None:
             self._commanded = target.copy()
-            self._commanded_delta = np.zeros_like(target)
+            self._commanded_velocity = np.zeros_like(target)
             return target
-        # A deg/s^2 budget spent over one cycle of 1/rate seconds changes the
-        # per-cycle step by A / rate^2 degrees.
-        max_change = np.deg2rad(self.config.joint_acceleration_degrees / self.config.rate**2)
-        delta = np.clip(
-            target - self._commanded,
-            self._commanded_delta - max_change,
-            self._commanded_delta + max_change,
+
+        # Never credit less than a nominal period, so ordinary jitter does not
+        # make the arm sluggish, and never more than a few of them, so a long
+        # stall cannot bank a large budget and release it in one step.
+        period = 1.0 / self.config.rate
+        elapsed = float(min(max(elapsed_seconds, period), _MAX_ACCELERATION_PERIODS * period))
+        budget = np.deg2rad(self.config.joint_acceleration_degrees) * elapsed
+
+        desired_velocity = (target - self._commanded) / elapsed
+        velocity = np.clip(
+            desired_velocity,
+            self._commanded_velocity - budget,
+            self._commanded_velocity + budget,
         )
-        self._commanded = self._commanded + delta
-        self._commanded_delta = delta
+        self._commanded = self._commanded + velocity * elapsed
+        self._commanded_velocity = velocity
         return self._commanded.copy()
 
     def validate(self, target_radians: np.ndarray, *, check_jump: bool = True) -> None:
@@ -472,11 +486,12 @@ class XArm6Hardware:
                 joints = slewed
             self.safety.validate(joints)
             if self.config.mode == 1:
+                elapsed = time.monotonic() - self._last_command_time
                 # Servo mode has no controller-side acceleration limit, so the
                 # equivalent bound is applied here. It runs after validation so
                 # that an impossible leader movement still faults on the raw
                 # target rather than being clamped into an acceptable one.
-                joints = self.safety.limit_acceleration(joints)
+                joints = self.safety.limit_acceleration(joints, elapsed)
             code, at_limit = self.arm.is_joint_limit(joints.tolist(), is_radian=True)
             self._check_code("is_joint_limit", code)
             if at_limit is not False:
