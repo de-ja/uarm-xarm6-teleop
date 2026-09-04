@@ -208,6 +208,10 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# Machine-local configuration overlay. Holds the robot IP and serial device,
+# which are deployment details rather than source.
+configs/local.toml
+
 # Local structured controller session logs.
 *.jsonl
 
