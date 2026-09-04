@@ -9,6 +9,9 @@ from pathlib import Path
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "uarm_xarm6.toml"
 
+# Reported by the controller as joint_speed_limit; commanding beyond it faults.
+XARM6_MAX_JOINT_SPEED_DEGREES = 180.0
+
 
 @dataclass(frozen=True)
 class GripperLimits:
@@ -186,8 +189,8 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
     physical = config.physical_xarm
     if physical.rate <= 0:
         raise ValueError("physical_xarm.rate must be positive")
-    if physical.mode != 6:
-        raise ValueError("physical_xarm.mode must be 6 for joint-servo teleoperation")
+    if physical.mode not in (1, 6):
+        raise ValueError("physical_xarm.mode must be 1 (servo streaming) or 6 (online planning)")
     positive_values = {
         "joint_speed_degrees": physical.joint_speed_degrees,
         "joint_acceleration_degrees": physical.joint_acceleration_degrees,
@@ -217,6 +220,17 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
             f"{blind_seconds:.3f}s must stay below physical_xarm.watchdog_timeout "
             f"({physical.watchdog_timeout:.3f}s)"
         )
+    # Mode 1 streams positions with no trajectory planning, so the per-sample
+    # jump and the loop rate together dictate the commanded joint velocity. The
+    # xArm6 refuses joint speeds above 180 deg/s, so the configuration must not
+    # be able to ask for one.
+    if physical.mode == 1:
+        implied_speed = physical.max_target_jump_degrees * physical.rate
+        if implied_speed > XARM6_MAX_JOINT_SPEED_DEGREES:
+            raise ValueError(
+                f"physical_xarm.max_target_jump_degrees x rate = {implied_speed:.1f} deg/s "
+                f"exceeds the {XARM6_MAX_JOINT_SPEED_DEGREES:.0f} deg/s joint limit in mode 1"
+            )
     if len(physical.joint_lower_degrees) != 6 or len(physical.joint_upper_degrees) != 6:
         raise ValueError("physical_xarm joint limits must contain six values")
     if any(

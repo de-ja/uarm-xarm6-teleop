@@ -469,16 +469,26 @@ class XArm6Hardware:
                 self._gripper_contact_latched = True
                 send_gripper_target = self._last_gripper_position
 
-            self._check_code(
-                "set_servo_angle",
-                self.arm.set_servo_angle(
-                    angle=joints.tolist(),
-                    speed=float(np.deg2rad(self.config.joint_speed_degrees)),
-                    mvacc=float(np.deg2rad(self.config.joint_acceleration_degrees)),
-                    is_radian=True,
-                    wait=False,
-                ),
-            )
+            if self.config.mode == 1:
+                # Servo mode streams the target straight to the joint
+                # controller. It performs no trajectory planning, so the speed
+                # and acceleration arguments are reserved and ignored, and the
+                # validated per-sample jump is what bounds joint velocity.
+                self._check_code(
+                    "set_servo_angle_j",
+                    self.arm.set_servo_angle_j(joints.tolist(), is_radian=True),
+                )
+            else:
+                self._check_code(
+                    "set_servo_angle",
+                    self.arm.set_servo_angle(
+                        angle=joints.tolist(),
+                        speed=float(np.deg2rad(self.config.joint_speed_degrees)),
+                        mvacc=float(np.deg2rad(self.config.joint_acceleration_degrees)),
+                        is_radian=True,
+                        wait=False,
+                    ),
+                )
             if send_gripper_target != self._last_gripper_position:
                 self.gripper.move_to(send_gripper_target)
                 self._last_gripper_position = send_gripper_target

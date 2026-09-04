@@ -46,7 +46,7 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.toml"
             path.write_text("[physical_xarm]\nmode = 0\n")
-            with self.assertRaisesRegex(ValueError, "mode must be 6"):
+            with self.assertRaisesRegex(ValueError, "mode must be 1"):
                 load_config(path)
 
     def test_wireless_override_is_applied(self):
@@ -147,6 +147,34 @@ class ConfigTests(unittest.TestCase):
                 "gripper_force = 500\n"
             )
             self.assertEqual(load_config(path).physical_xarm.gripper_force, 500)
+
+    def test_servo_mode_is_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text(
+                "[physical_xarm]\nmode = 1\nrate = 100.0\n"
+                "max_target_jump_degrees = 1.5\ncatchup_step_degrees = 0.8\n"
+            )
+            physical = load_config(path).physical_xarm
+        self.assertEqual(physical.mode, 1)
+
+    def test_servo_mode_rejects_a_jump_and_rate_beyond_the_joint_speed_limit(self):
+        # 2.5 deg at 100 Hz asks for 250 deg/s, past the arm's 180 deg/s ceiling.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text(
+                "[physical_xarm]\nmode = 1\nrate = 100.0\n"
+                "max_target_jump_degrees = 2.5\ncatchup_step_degrees = 0.8\n"
+            )
+            with self.assertRaisesRegex(ValueError, "180 deg/s joint limit"):
+                load_config(path)
+
+    def test_planning_mode_is_not_bound_by_the_servo_velocity_check(self):
+        # Mode 6 plans within its own limits, so the same numbers are fine.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text("[physical_xarm]\nmode = 6\nrate = 100.0\n")
+            self.assertEqual(load_config(path).physical_xarm.mode, 6)
 
 
 if __name__ == "__main__":
