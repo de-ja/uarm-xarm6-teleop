@@ -78,6 +78,11 @@ class FakeArm:
         self.calls.append(("set_servo_angle", kwargs))
         return 0
 
+    def set_servo_angle_j(self, angles, **kwargs):
+        self.joints = list(angles)
+        self.calls.append(("set_servo_angle_j", angles, kwargs))
+        return 0
+
     def set_gripper_g2_position(self, position, **kwargs):
         self.gripper = position
         self.calls.append(("set_gripper_g2_position", position, kwargs))
@@ -386,6 +391,63 @@ class ClassicGripperTests(unittest.TestCase):
             len([call for call in fake.calls if call[0] == "set_gripper_position"]),
             gripper_calls,
         )
+        backend.close()
+
+
+class ServoModeTests(unittest.TestCase):
+    """Cover mode 1 servo streaming, which bypasses the trajectory planner."""
+
+    def setUp(self):
+        base = load_config().physical_xarm
+        self.config = replace(
+            base,
+            robot_ip="192.0.2.1",
+            watchdog_timeout=10.0,
+            mode=1,
+            rate=100.0,
+            max_target_jump_degrees=1.5,
+            catchup_step_degrees=0.8,
+        )
+        self.reference = np.deg2rad([0.0, -75.0, 10.0, 0.0, 60.0, 0.0])
+
+    def make_backend(self):
+        fake = FakeArm("192.0.2.1", joints=self.reference)
+        return XArm6Hardware(self.config, api_factory=lambda *_a, **_k: fake), fake
+
+    def test_mode_1_streams_through_servoj_without_planner_arguments(self):
+        backend, fake = self.make_backend()
+        backend.arm_motion(self.reference)
+        backend.command(np.concatenate([self.reference, [0.0]]), gripper_command_max=0.81)
+        backend.close()
+
+        self.assertIn(("set_mode", 1), fake.calls)
+        call = next(c for c in fake.calls if c[0] == "set_servo_angle_j")
+        # speed and mvacc are reserved in servoj; sending them would be misleading.
+        self.assertNotIn("speed", call[2])
+        self.assertNotIn("mvacc", call[2])
+        self.assertTrue(call[2]["is_radian"])
+        self.assertFalse(any(c[0] == "set_servo_angle" for c in fake.calls))
+
+    def test_mode_6_still_uses_the_planning_interface(self):
+        config = replace(self.config, mode=6, rate=50.0, max_target_jump_degrees=5.0)
+        fake = FakeArm("192.0.2.1", joints=self.reference)
+        backend = XArm6Hardware(config, api_factory=lambda *_a, **_k: fake)
+        backend.arm_motion(self.reference)
+        backend.command(np.concatenate([self.reference, [0.0]]), gripper_command_max=0.81)
+        backend.close()
+
+        self.assertTrue(any(c[0] == "set_servo_angle" for c in fake.calls))
+        self.assertFalse(any(c[0] == "set_servo_angle_j" for c in fake.calls))
+
+    def test_servo_mode_still_enforces_the_jump_limit(self):
+        # Without a planner the jump limit is the only bound on joint velocity.
+        backend, _fake = self.make_backend()
+        backend.arm_motion(self.reference)
+        backend.command(np.concatenate([self.reference, [0.0]]), gripper_command_max=0.81)
+        target = self.reference.copy()
+        target[0] += np.deg2rad(3.0)
+        with self.assertRaisesRegex(XArmHardwareError, "jumped"):
+            backend.command(np.concatenate([target, [0.0]]), gripper_command_max=0.81)
         backend.close()
 
 
