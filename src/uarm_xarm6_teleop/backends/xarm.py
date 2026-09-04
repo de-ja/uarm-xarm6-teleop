@@ -1,9 +1,10 @@
-"""Guarded UFACTORY xArm6 and xArm Gripper G2 backend."""
+"""Guarded UFACTORY xArm6 backend for the xArm Gripper and Gripper G2."""
 
 from __future__ import annotations
 
 import threading
 import time
+from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from types import TracebackType
@@ -18,6 +19,20 @@ class XArmHardwareError(RuntimeError):
     """Raised when a physical command cannot be proven safe to send."""
 
 
+def _check_code(operation: str, code: int) -> None:
+    """Raise when an SDK call reports a non-zero status code.
+
+    Args:
+        operation: SDK method name to quote in the error message.
+        code: Status code the SDK returned.
+
+    Raises:
+        XArmHardwareError: If the code is not zero.
+    """
+    if code != 0:
+        raise XArmHardwareError(f"xArm {operation} failed with SDK code {code}")
+
+
 class _XArmAPI(Protocol):
     connected: bool
     version: str
@@ -28,7 +43,7 @@ class _XArmAPI(Protocol):
 
 @dataclass(frozen=True)
 class XArmStatus:
-    """Capture a read-only snapshot of xArm and Gripper G2 state."""
+    """Capture a read-only snapshot of xArm, controller, and gripper state."""
 
     connected: bool
     version: str
@@ -41,6 +56,100 @@ class XArmStatus:
     gripper_force: int | None
     gripper_status: int | None
     gripper_error_code: int
+
+
+class _GripperDriver(ABC):
+    """Adapt one UFACTORY gripper family to the calls the follower makes.
+
+    The two families disagree on units, so every position and speed handled
+    here is in the units of the configured family and never interchangeable.
+    """
+
+    def __init__(self, arm: _XArmAPI, config: PhysicalXArmConfig) -> None:
+        self.arm = arm
+        self.config = config
+
+    def enable(self) -> None:
+        """Prepare the gripper to accept position commands."""
+
+    @abstractmethod
+    def read_position(self) -> int:
+        """Return the measured jaw position in this family's units."""
+
+    def read_force(self) -> int | None:
+        """Return the measured grip force, or None when the family lacks it."""
+        return None
+
+    @abstractmethod
+    def move_to(self, position: int) -> None:
+        """Command an absolute jaw position in this family's units."""
+
+
+class _G2Gripper(_GripperDriver):
+    """Drive an xArm Gripper G2, which takes width in mm and caps force itself."""
+
+    def read_position(self) -> int:
+        """Return the measured opening width in millimetres."""
+        code, position = self.arm.get_gripper_g2_position()
+        _check_code("get_gripper_g2_position", code)
+        return int(position)
+
+    def read_force(self) -> int | None:
+        """Return the measured force when this SDK build reports it."""
+        reader = getattr(self.arm, "get_gripper_g2_force", None)
+        if not callable(reader):
+            return None
+        code, force = reader()
+        return int(force) if code == 0 else None
+
+    def move_to(self, position: int) -> None:
+        """Command an opening width in millimetres under the configured force."""
+        _check_code(
+            "set_gripper_g2_position",
+            self.arm.set_gripper_g2_position(
+                position,
+                speed=self.config.gripper_speed,
+                force=self.config.gripper_force,
+                wait=False,
+            ),
+        )
+
+
+class _ClassicGripper(_GripperDriver):
+    """Drive the original xArm Gripper, which takes pulses and caps no force.
+
+    This family accepts no force argument, so ``gripper_force`` is inert and
+    over-grip protection rests entirely on the contact latch in
+    :class:`XArm6Hardware` and on a small configured ``gripper_max_step``.
+    """
+
+    def enable(self) -> None:
+        """Enable the gripper servo and select absolute position mode."""
+        _check_code("set_gripper_enable", self.arm.set_gripper_enable(True))
+        _check_code("set_gripper_mode", self.arm.set_gripper_mode(0))
+
+    def read_position(self) -> int:
+        """Return the measured jaw position as an encoder pulse count."""
+        code, position = self.arm.get_gripper_position()
+        _check_code("get_gripper_position", code)
+        return int(position)
+
+    def move_to(self, position: int) -> None:
+        """Command an absolute jaw position as an encoder pulse count."""
+        _check_code(
+            "set_gripper_position",
+            self.arm.set_gripper_position(
+                position,
+                speed=self.config.gripper_speed,
+                wait=False,
+            ),
+        )
+
+
+_GRIPPER_DRIVERS: dict[str, type[_GripperDriver]] = {
+    "g2": _G2Gripper,
+    "classic": _ClassicGripper,
+}
 
 
 class TargetSafety:
@@ -151,6 +260,13 @@ class XArm6Hardware:
 
         self.config = config
         self.arm = api_factory(config.robot_ip, is_radian=True)
+        try:
+            driver = _GRIPPER_DRIVERS[config.gripper_kind]
+        except KeyError as error:
+            raise XArmHardwareError(
+                f"Unsupported physical_xarm.gripper_kind '{config.gripper_kind}'"
+            ) from error
+        self.gripper = driver(self.arm, config)
         self.safety = TargetSafety(config)
         self._lock = threading.RLock()
         self._armed = False
@@ -164,8 +280,7 @@ class XArm6Hardware:
 
     @staticmethod
     def _check_code(operation: str, code: int) -> None:
-        if code != 0:
-            raise XArmHardwareError(f"xArm {operation} failed with SDK code {code}")
+        _check_code(operation, code)
 
     def inspect(self) -> XArmStatus:
         """Read robot, controller, joints, and gripper without enabling motion."""
@@ -187,14 +302,8 @@ class XArm6Hardware:
             if len(joints) < axis:
                 raise XArmHardwareError("The controller returned an incomplete joint sample")
             joints = joints[:axis]
-            code, gripper = self.arm.get_gripper_g2_position()
-            self._check_code("get_gripper_g2_position", code)
-            gripper_force = None
-            get_gripper_force = getattr(self.arm, "get_gripper_g2_force", None)
-            if callable(get_gripper_force):
-                code, force = get_gripper_force()
-                if code == 0:
-                    gripper_force = int(force)
+            gripper = self.gripper.read_position()
+            gripper_force = self.gripper.read_force()
             status_code, gripper_status = self.arm.get_gripper_status()
             if status_code != 0:
                 gripper_status = None
@@ -252,6 +361,7 @@ class XArm6Hardware:
             self._check_code("motion_enable", self.arm.motion_enable(enable=True))
             self._check_code("set_mode", self.arm.set_mode(self.config.mode))
             self._check_code("set_state", self.arm.set_state(0))
+            self.gripper.enable()
         except Exception:
             self._best_effort_stop()
             raise
@@ -370,15 +480,7 @@ class XArm6Hardware:
                 ),
             )
             if send_gripper_target != self._last_gripper_position:
-                self._check_code(
-                    "set_gripper_g2_position",
-                    self.arm.set_gripper_g2_position(
-                        send_gripper_target,
-                        speed=self.config.gripper_speed,
-                        force=self.config.gripper_force,
-                        wait=False,
-                    ),
-                )
+                self.gripper.move_to(send_gripper_target)
                 self._last_gripper_position = send_gripper_target
             self._last_command_time = time.monotonic()
 
@@ -405,21 +507,12 @@ class XArm6Hardware:
 
     def _freeze_gripper(self) -> None:
         """Best-effort replacement of a closing target with measured position."""
-        code, position = self.arm.get_gripper_g2_position()
-        if code != 0 or position is None:
-            return
-        position = int(position)
         try:
-            code = self.arm.set_gripper_g2_position(
-                position,
-                speed=self.config.gripper_speed,
-                force=self.config.gripper_force,
-                wait=False,
-            )
+            position = self.gripper.read_position()
+            self.gripper.move_to(position)
         except Exception:
             return
-        if code == 0:
-            self._last_gripper_position = position
+        self._last_gripper_position = position
 
     def _start_watchdog(self) -> None:
         self._watchdog_stop.clear()

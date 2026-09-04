@@ -53,8 +53,13 @@ def format_target(action: np.ndarray) -> str:
     return f"{joints}  grip={action[6]:.3f}"
 
 
-def print_status(status: XArmStatus) -> None:
-    """Print a read-only xArm and Gripper G2 status snapshot."""
+def print_status(status: XArmStatus, gripper_kind: str = "g2") -> None:
+    """Print a read-only xArm and gripper status snapshot.
+
+    Args:
+        status: Snapshot returned by a read-only follower inspection.
+        gripper_kind: Configured gripper family, which selects the position unit.
+    """
     joints = ", ".join(f"{value:+.2f}" for value in status.joint_degrees)
     print(f"Connected: {status.connected}  SDK/firmware: {status.version}")
     print(
@@ -66,8 +71,9 @@ def print_status(status: XArmStatus) -> None:
         status.gripper_status, "unavailable"
     )
     gripper_force = "unavailable" if status.gripper_force is None else str(status.gripper_force)
+    label, unit = ("xArm Gripper G2", "mm") if gripper_kind == "g2" else ("xArm Gripper", "pulses")
     print(
-        f"xArm Gripper G2: {status.gripper_position} mm, force "
+        f"{label}: {status.gripper_position} {unit}, force "
         f"{gripper_force}, state {gripper_state}, "
         f"error {status.gripper_error_code}"
     )
@@ -86,7 +92,7 @@ def run() -> None:
 
     if args.inspect:
         with XArm6Hardware(physical) as follower:
-            print_status(follower.inspect())
+            print_status(follower.inspect(), physical.gripper_kind)
         print("Inspection was read-only; motion was not enabled.")
         return
 
@@ -127,7 +133,7 @@ def run() -> None:
                         ),
                     )
                     action = mapping.action(sample.radians)
-                print_status(status)
+                print_status(status, physical.gripper_kind)
                 if config.xarm6.gripper_mode == "toggle":
                     print("Preserving the G2's current opening width at startup.")
                 else:

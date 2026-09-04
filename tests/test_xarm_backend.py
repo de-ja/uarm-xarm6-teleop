@@ -83,6 +83,14 @@ class FakeArm:
         self.calls.append(("set_gripper_g2_position", position, kwargs))
         return 0
 
+    def get_gripper_position(self):
+        return 0, self.gripper
+
+    def set_gripper_position(self, position, **kwargs):
+        self.gripper = position
+        self.calls.append(("set_gripper_position", position, kwargs))
+        return 0
+
     def disconnect(self):
         self.connected = False
 
@@ -285,6 +293,99 @@ class XArmBackendTests(unittest.TestCase):
         closed = np.concatenate([self.reference, [0.81]])
         with self.assertRaisesRegex(XArmHardwareError, "error 11"):
             backend.command(closed, gripper_command_max=0.81)
+        backend.close()
+
+
+class ClassicGripperTests(unittest.TestCase):
+    """Cover the original xArm Gripper, which uses pulses and caps no force."""
+
+    def setUp(self):
+        base = load_config().physical_xarm
+        self.config = replace(
+            base,
+            robot_ip="192.0.2.1",
+            watchdog_timeout=10.0,
+            gripper_kind="classic",
+            gripper_open_position=850,
+            gripper_closed_position=0,
+            gripper_speed=1500,
+            gripper_max_step=20,
+        )
+        self.reference = np.deg2rad([0.0, -75.0, 10.0, 0.0, 60.0, 0.0])
+
+    def make_backend(self):
+        fake = FakeArm("192.0.2.1", joints=self.reference)
+        fake.gripper = 850
+        backend = XArm6Hardware(self.config, api_factory=lambda *_args, **_kwargs: fake)
+        return backend, fake
+
+    def test_unknown_gripper_kind_is_rejected_before_any_sdk_call(self):
+        config = replace(self.config, gripper_kind="bio")
+        with self.assertRaisesRegex(XArmHardwareError, "gripper_kind"):
+            XArm6Hardware(config, api_factory=lambda *_args, **_kwargs: FakeArm("192.0.2.1"))
+
+    def test_arming_enables_the_gripper_servo_and_selects_position_mode(self):
+        backend, fake = self.make_backend()
+        backend.arm_motion(self.reference)
+        backend.close()
+
+        self.assertIn(("set_gripper_enable", True), fake.calls)
+        self.assertIn(("set_gripper_mode", 0), fake.calls)
+
+    def test_g2_arming_does_not_enable_a_gripper_servo(self):
+        # The G2 needs no explicit enable, so the classic-only calls must not leak.
+        base = load_config().physical_xarm
+        config = replace(base, robot_ip="192.0.2.1", watchdog_timeout=10.0)
+        fake = FakeArm("192.0.2.1", joints=self.reference)
+        backend = XArm6Hardware(config, api_factory=lambda *_args, **_kwargs: fake)
+        backend.arm_motion(self.reference)
+        backend.close()
+
+        self.assertFalse(any(call[0] == "set_gripper_enable" for call in fake.calls))
+        self.assertFalse(any(call[0] == "set_gripper_mode" for call in fake.calls))
+
+    def test_command_sends_pulses_without_a_force_argument(self):
+        backend, fake = self.make_backend()
+        backend.arm_motion(self.reference)
+        backend.command(np.concatenate([self.reference, [0.81]]), gripper_command_max=0.81)
+        backend.close()
+
+        gripper_call = next(call for call in fake.calls if call[0] == "set_gripper_position")
+        # One closing step of gripper_max_step pulses away from fully open.
+        self.assertEqual(gripper_call[1], 830)
+        self.assertEqual(gripper_call[2]["speed"], 1500)
+        self.assertNotIn("force", gripper_call[2])
+        self.assertFalse(any(call[0] == "set_gripper_g2_position" for call in fake.calls))
+
+    def test_inspection_reports_no_force_reading(self):
+        backend, _fake = self.make_backend()
+        status = backend.inspect()
+        backend.close()
+
+        # The classic controller exposes no force telemetry to report.
+        self.assertIsNone(status.gripper_force)
+        self.assertEqual(status.gripper_position, 850)
+
+    def test_grasp_status_freezes_closing_until_an_open_command(self):
+        backend, fake = self.make_backend()
+        backend.arm_motion(self.reference)
+        closed = np.concatenate([self.reference, [0.81]])
+
+        backend.command(closed, gripper_command_max=0.81)
+        self.assertEqual(fake.gripper, 830)
+        fake.gripper = 600
+        fake.gripper_status = 2
+        backend.command(closed, gripper_command_max=0.81)
+        self.assertTrue(backend.gripper_contact_latched)
+        self.assertEqual(fake.gripper, 600)
+
+        gripper_calls = len([call for call in fake.calls if call[0] == "set_gripper_position"])
+        fake.gripper_status = 0
+        backend.command(closed, gripper_command_max=0.81)
+        self.assertEqual(
+            len([call for call in fake.calls if call[0] == "set_gripper_position"]),
+            gripper_calls,
+        )
         backend.close()
 
 

@@ -11,6 +11,26 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "uarm_xa
 
 
 @dataclass(frozen=True)
+class GripperLimits:
+    """Describe the command ranges a UFACTORY gripper family accepts."""
+
+    max_position: int
+    min_speed: int
+    max_speed: int
+    enforces_force: bool
+
+
+# The two families use different units for the same arguments, so a value that
+# is valid for one is silently wrong for the other. The G2 takes an opening
+# width in millimetres and a speed in mm/s; the classic gripper takes an
+# encoder pulse count and a speed in r/min, and accepts no force argument.
+GRIPPER_LIMITS: dict[str, GripperLimits] = {
+    "g2": GripperLimits(max_position=84, min_speed=15, max_speed=225, enforces_force=True),
+    "classic": GripperLimits(max_position=850, min_speed=1, max_speed=5000, enforces_force=False),
+}
+
+
+@dataclass(frozen=True)
 class SerialConfig:
     """Describe the Feetech serial bus and ordered servo IDs."""
 
@@ -82,6 +102,7 @@ class PhysicalXArmConfig:
     watchdog_timeout: float
     joint_lower_degrees: tuple[float, ...]
     joint_upper_degrees: tuple[float, ...]
+    gripper_kind: str
     gripper_open_position: int
     gripper_closed_position: int
     gripper_speed: int
@@ -203,15 +224,28 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
         for lower, upper in zip(physical.joint_lower_degrees, physical.joint_upper_degrees)
     ):
         raise ValueError("physical_xarm lower joint limits must be below upper limits")
-    if not 0 <= physical.gripper_open_position <= 84:
-        raise ValueError("physical_xarm.gripper_open_position must be between 0 and 84")
-    if not 0 <= physical.gripper_closed_position <= 84:
-        raise ValueError("physical_xarm.gripper_closed_position must be between 0 and 84")
+    if physical.gripper_kind not in GRIPPER_LIMITS:
+        raise ValueError(
+            "physical_xarm.gripper_kind must be one of " + ", ".join(sorted(GRIPPER_LIMITS))
+        )
+    limits = GRIPPER_LIMITS[physical.gripper_kind]
+    for name in ("gripper_open_position", "gripper_closed_position"):
+        position = getattr(physical, name)
+        if not 0 <= position <= limits.max_position:
+            raise ValueError(
+                f"physical_xarm.{name} must be between 0 and {limits.max_position} "
+                f"for gripper_kind '{physical.gripper_kind}'"
+            )
     if physical.gripper_open_position <= physical.gripper_closed_position:
         raise ValueError("physical_xarm.gripper_open_position must exceed gripper_closed_position")
-    if not 15 <= physical.gripper_speed <= 225:
-        raise ValueError("physical_xarm.gripper_speed must be between 15 and 225")
-    if not 1 <= physical.gripper_force <= 100:
+    if not limits.min_speed <= physical.gripper_speed <= limits.max_speed:
+        raise ValueError(
+            f"physical_xarm.gripper_speed must be between {limits.min_speed} and "
+            f"{limits.max_speed} for gripper_kind '{physical.gripper_kind}'"
+        )
+    # The classic gripper's SDK accepts no force argument, so the value is
+    # carried but never sent. Only the G2 controller enforces a force ceiling.
+    if limits.enforces_force and not 1 <= physical.gripper_force <= 100:
         raise ValueError("physical_xarm.gripper_force must be between 1 and 100")
     return config
 
@@ -298,6 +332,7 @@ def load_config(path: str | Path | None = None) -> TeleopConfig:
             joint_upper_degrees=tuple(
                 float(value) for value in physical_xarm["joint_upper_degrees"]
             ),
+            gripper_kind=str(physical_xarm.get("gripper_kind", "g2")),
             gripper_open_position=int(physical_xarm["gripper_open_position"]),
             gripper_closed_position=int(physical_xarm["gripper_closed_position"]),
             gripper_speed=int(physical_xarm["gripper_speed"]),

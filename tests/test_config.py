@@ -94,6 +94,60 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must exceed"):
                 load_config(path)
 
+    def test_gripper_kind_defaults_to_g2(self):
+        self.assertEqual(load_config().physical_xarm.gripper_kind, "g2")
+
+    def test_unknown_gripper_kind_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text('[physical_xarm]\ngripper_kind = "bio"\n')
+            with self.assertRaisesRegex(ValueError, "gripper_kind"):
+                load_config(path)
+
+    def test_g2_position_beyond_its_millimetre_range_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text("[physical_xarm]\ngripper_open_position = 850\n")
+            with self.assertRaisesRegex(ValueError, "gripper_open_position"):
+                load_config(path)
+
+    def test_classic_accepts_pulse_positions_and_r_per_minute_speed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text(
+                "[physical_xarm]\n"
+                'gripper_kind = "classic"\n'
+                "gripper_open_position = 850\n"
+                "gripper_speed = 1500\n"
+                "gripper_max_step = 20\n"
+            )
+            physical = load_config(path).physical_xarm
+        self.assertEqual(physical.gripper_kind, "classic")
+        self.assertEqual(physical.gripper_open_position, 850)
+        self.assertEqual(physical.gripper_speed, 1500)
+
+    def test_classic_position_beyond_its_pulse_range_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text(
+                '[physical_xarm]\ngripper_kind = "classic"\ngripper_open_position = 900\n'
+            )
+            with self.assertRaisesRegex(ValueError, "gripper_open_position"):
+                load_config(path)
+
+    def test_classic_ignores_the_g2_force_range(self):
+        # The classic SDK takes no force argument, so the 1-100 cap cannot apply.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text(
+                "[physical_xarm]\n"
+                'gripper_kind = "classic"\n'
+                "gripper_open_position = 850\n"
+                "gripper_speed = 1500\n"
+                "gripper_force = 500\n"
+            )
+            self.assertEqual(load_config(path).physical_xarm.gripper_force, 500)
+
 
 if __name__ == "__main__":
     unittest.main()
