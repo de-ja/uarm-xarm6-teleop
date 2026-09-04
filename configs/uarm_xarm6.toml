@@ -11,7 +11,7 @@ directions = [1, 1, 1, 1, 1, 1, 1]
 labels = ["base", "shoulder", "J3", "J4", "J5", "wrist", "trigger"]
 
 [xarm6]
-reference_degrees = [0.0, -75.0, 9.0, 0.0, 70.0, 0.0]
+reference_degrees = [0.0, -75.0, 9.0, 0.0, 0.0, 0.0]
 joint_directions = [-1, -1, -1, -1, 1, -1]
 # Measured servo-7 travel from raw 2457 (open) to 2757 (fully pressed).
 gripper_travel_degrees = 26.3671875
