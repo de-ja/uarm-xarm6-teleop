@@ -11,6 +11,8 @@ from uarm_xarm6_teleop.camera import (
     CameraError,
     CameraInfo,
     CameraManager,
+    _decode_fourcc,
+    _encode_fourcc,
 )
 
 
@@ -52,6 +54,49 @@ class CameraCatalogTests(unittest.TestCase):
 
             with self.assertRaisesRegex(CameraError, "refresh the camera list"):
                 catalog.get("missing")
+
+
+class CaptureProfileTests(unittest.TestCase):
+    def test_fourcc_round_trips_through_the_v4l2_integer_code(self):
+        # 0x47504a4d is the V4L2 code a driver reports back for MJPG.
+        self.assertEqual(_encode_fourcc("MJPG"), 0x47504A4D)
+        self.assertEqual(_decode_fourcc(0x47504A4D), "MJPG")
+        self.assertEqual(_decode_fourcc(_encode_fourcc("YUYV")), "YUYV")
+
+    def test_manager_requests_a_compressed_format_by_default(self):
+        self.assertEqual(CameraManager().fourcc, "MJPG")
+
+    def test_manager_rejects_a_malformed_pixel_format(self):
+        with self.assertRaises(ValueError):
+            CameraManager(fourcc="MJPEG")
+
+    def test_granted_profile_is_logged_without_a_warning(self):
+        manager = CameraManager(width=1280, height=720, fps=15)
+        with self.assertLogs("uarm_xarm6_teleop.camera", level="INFO") as logs:
+            manager.report_negotiated_profile(
+                "/dev/video0", fourcc="MJPG", width=1280, height=720, fps=15.0
+            )
+        self.assertEqual(len(logs.records), 1)
+        self.assertEqual(logs.records[0].levelname, "INFO")
+
+    def test_silent_driver_downgrade_is_reported(self):
+        manager = CameraManager(width=1280, height=720, fps=15)
+        with self.assertLogs("uarm_xarm6_teleop.camera", level="WARNING") as logs:
+            manager.report_negotiated_profile(
+                "/dev/video0", fourcc="YUYV", width=640, height=480, fps=10.0
+            )
+        message = logs.records[0].getMessage()
+        self.assertIn("format MJPG -> YUYV", message)
+        self.assertIn("size 1280x720 -> 640x480", message)
+        self.assertIn("rate 15 -> 10 fps", message)
+
+    def test_unreported_driver_frame_rate_is_not_a_downgrade(self):
+        manager = CameraManager(width=1280, height=720, fps=15)
+        with self.assertLogs("uarm_xarm6_teleop.camera", level="INFO") as logs:
+            manager.report_negotiated_profile(
+                "/dev/video0", fourcc="MJPG", width=1280, height=720, fps=0.0
+            )
+        self.assertEqual(logs.records[0].levelname, "INFO")
 
 
 class CameraManagerTests(unittest.TestCase):

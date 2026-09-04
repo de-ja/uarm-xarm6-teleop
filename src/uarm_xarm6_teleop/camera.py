@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import logging
 import math
 import os
 import struct
@@ -18,6 +19,8 @@ VIDIOC_QUERYCAP = 0x80685600
 V4L2_CAP_VIDEO_CAPTURE = 0x00000001
 V4L2_CAP_VIDEO_CAPTURE_MPLANE = 0x00001000
 V4L2_CAP_DEVICE_CAPS = 0x80000000
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class CameraError(RuntimeError):
@@ -48,6 +51,16 @@ class CameraInfo:
 
 def _decode_c_string(value: bytes) -> str:
     return value.split(b"\0", 1)[0].decode(errors="replace").strip()
+
+
+def _encode_fourcc(label: str) -> int:
+    """Pack a four-character V4L2 format label into its integer code."""
+    return sum(ord(character) << (8 * index) for index, character in enumerate(label))
+
+
+def _decode_fourcc(code: int) -> str:
+    """Unpack an integer V4L2 format code into its four-character label."""
+    return "".join(chr((code >> (8 * index)) & 0xFF) for index in range(4)).strip()
 
 
 def query_camera_capability(device: Path) -> CameraCapability:
@@ -102,21 +115,6 @@ class CameraCatalog:
             if capability.can_capture:
                 discovered[node.resolve()] = capability
         return discovered
-
-    def newest_capture_monotonic(self) -> float | None:
-        """Return the newest frame capture time across active capture sessions.
-
-        Returns:
-            Capture time on this process's monotonic clock, or None when no
-            session currently holds a frame. Used to compare video freshness
-            against robot commands without involving the browser's clock.
-        """
-        with self.lock:
-            sessions = list(self.sessions.values())
-        captures = [
-            session.frame.captured_monotonic for session in sessions if session.frame is not None
-        ]
-        return max(captures) if captures else None
 
     def list_cameras(self) -> tuple[CameraInfo, ...]:
         """Return deduplicated capture devices, preferring stable symlinks."""
@@ -420,6 +418,10 @@ class CameraManager:
         width: Requested capture width in pixels.
         height: Requested capture height in pixels.
         fps: Requested capture frame rate.
+        fourcc: Requested V4L2 pixel format. An uncompressed format such as
+            ``YUYV`` costs roughly thirteen times the USB bandwidth of ``MJPG``
+            for the same picture, so only a camera without MJPG support should
+            override this.
         jpeg_quality: Initial JPEG quality.
         min_jpeg_quality: Minimum adaptive JPEG quality.
         max_jpeg_quality: Maximum adaptive JPEG quality.
@@ -428,6 +430,9 @@ class CameraManager:
         frame_encoder: Optional JPEG encoder.
         wall_time: Clock used to timestamp frames for browser latency measurement.
         monotonic: Clock used to compare video freshness with robot commands.
+
+    Raises:
+        ValueError: If the requested pixel format is not a four-character label.
     """
 
     def __init__(
@@ -437,6 +442,7 @@ class CameraManager:
         width: int = 1280,
         height: int = 720,
         fps: int = 15,
+        fourcc: str = "MJPG",
         jpeg_quality: int = 80,
         min_jpeg_quality: int = 35,
         max_jpeg_quality: int = 85,
@@ -450,6 +456,9 @@ class CameraManager:
         self.width = width
         self.height = height
         self.fps = fps
+        if len(fourcc) != 4:
+            raise ValueError("Camera fourcc must be a four-character V4L2 format label")
+        self.fourcc = fourcc
         self.jpeg_quality = jpeg_quality
         self.min_jpeg_quality = min_jpeg_quality
         self.max_jpeg_quality = max_jpeg_quality
@@ -469,11 +478,68 @@ class CameraManager:
                 "Camera streaming dependencies are missing; reinstall with `pip install -e '.[web]'`"
             ) from error
         capture = cv2.VideoCapture(device, cv2.CAP_V4L2)
+        # The pixel format must be selected before the geometry, because the
+        # V4L2 backend applies each property immediately and a later format
+        # change resets the frame size. Requesting an uncompressed format also
+        # makes the driver silently grant a lower frame rate than the one asked
+        # for here, since it cannot reserve that much isochronous USB bandwidth.
+        capture.set(cv2.CAP_PROP_FOURCC, float(_encode_fourcc(self.fourcc)))
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, float(self.width))
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, float(self.height))
         capture.set(cv2.CAP_PROP_FPS, float(self.fps))
-        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1.0)
+        # Two buffers is the shallowest queue that still reaches the full frame
+        # rate. A single buffer leaves the driver nowhere to place the next frame
+        # while this thread holds the current one, so it drops every second frame
+        # and halves the delivered rate. Staleness does not grow in exchange: the
+        # session keeps only the newest frame and this loop drains continuously,
+        # so the extra buffer holds at most one frame.
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 2.0)
+        self.report_negotiated_profile(
+            device,
+            fourcc=_decode_fourcc(int(capture.get(cv2.CAP_PROP_FOURCC))),
+            width=int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            height=int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            fps=float(capture.get(cv2.CAP_PROP_FPS)),
+        )
         return capture
+
+    def report_negotiated_profile(
+        self,
+        device: str,
+        *,
+        fourcc: str,
+        width: int,
+        height: int,
+        fps: float,
+    ) -> None:
+        """Log the capture profile the driver granted and warn on a downgrade.
+
+        A driver substitutes whatever format, size, or rate it can fit in the
+        available bus bandwidth rather than failing, so an unreported downgrade
+        is indistinguishable from a camera that is merely slow.
+
+        Args:
+            device: Device path this profile was negotiated for.
+            fourcc: Pixel format the driver granted.
+            width: Frame width the driver granted.
+            height: Frame height the driver granted.
+            fps: Frame rate the driver granted, or zero when it reports none.
+        """
+        downgrades = []
+        if fourcc != self.fourcc:
+            downgrades.append(f"format {self.fourcc} -> {fourcc}")
+        if (width, height) != (self.width, self.height):
+            downgrades.append(f"size {self.width}x{self.height} -> {width}x{height}")
+        if fps > 0 and abs(fps - self.fps) > 0.5:
+            downgrades.append(f"rate {self.fps} -> {fps:g} fps")
+        if downgrades:
+            _LOGGER.warning(
+                "%s negotiated a reduced capture profile: %s",
+                device,
+                "; ".join(downgrades),
+            )
+        else:
+            _LOGGER.info("%s negotiated %s %dx%d @ %g fps", device, fourcc, width, height, fps)
 
     @staticmethod
     def _encode_frame(frame: object, quality: int) -> bytes:
