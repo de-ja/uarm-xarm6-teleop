@@ -58,7 +58,15 @@ catchup_max_divergence_degrees = 45.0
 watchdog_timeout = 1.0
 joint_lower_degrees = [-360.0, -118.0, -217.7, -360.0, -97.0, -360.0]
 joint_upper_degrees = [360.0, 120.0, 11.0, 360.0, 180.0, 360.0]
-# xArm Gripper G2: position is opening width in mm; force range is 1-100.
+# Which UFACTORY gripper is attached: "g2" or "classic". The families use
+# different units and are not interchangeable, so the wrong value here is
+# rejected by configuration validation rather than sent to the hardware.
+#   g2      opening width in mm (0-84), speed in mm/s (15-225), force 1-100
+#   classic encoder pulses (0-850), speed in r/min, and no force argument
+# The classic gripper caps no force in its controller, so keep gripper_max_step
+# small: the contact latch is then the sole over-grip guard and needs several
+# 20 Hz cycles to react before meaningful force builds.
+gripper_kind = "g2"
 gripper_open_position = 84
 gripper_closed_position = 0
 gripper_speed = 50
