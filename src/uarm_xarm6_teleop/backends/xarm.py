@@ -158,6 +158,8 @@ class TargetSafety:
     def __init__(self, config: PhysicalXArmConfig) -> None:
         self.config = config
         self._previous: np.ndarray | None = None
+        self._commanded: np.ndarray | None = None
+        self._commanded_delta: np.ndarray | None = None
 
     def reset(self, target_radians: np.ndarray | None = None) -> None:
         """Clear jump history and optionally validate a new baseline target.
@@ -166,8 +168,51 @@ class TargetSafety:
             target_radians: Optional six-joint baseline that bypasses the jump check.
         """
         self._previous = None
+        self._commanded = None
+        self._commanded_delta = None
         if target_radians is not None:
             self.validate(target_radians, check_jump=False)
+
+    def limit_acceleration(self, target_radians: np.ndarray) -> np.ndarray:
+        """Bound how fast the commanded step may change, in place of mvacc.
+
+        The jump limit caps velocity but permits reversing it between one sample
+        and the next, which is a large acceleration that check cannot see. This
+        clamps the change in step size instead, so joint velocity ramps rather
+        than stepping.
+
+        It deliberately does not plan an arrival. Unlike the controller's own
+        planner it never decelerates toward the target, so closely spaced targets
+        are tracked continuously instead of becoming a sawtooth of
+        accelerate-then-decelerate profiles.
+
+        This shapes the commanded stream only. Call it after :meth:`validate`, so
+        that an impossible leader movement still faults on the raw target instead
+        of being quietly clamped into a legal one.
+
+        Args:
+            target_radians: Six validated xArm joint targets in radians.
+
+        Returns:
+            The target itself on the first call, otherwise the target clamped to
+            one acceleration step away from the previous commanded velocity.
+        """
+        target = np.asarray(target_radians, dtype=float)
+        if self._commanded is None or self._commanded_delta is None:
+            self._commanded = target.copy()
+            self._commanded_delta = np.zeros_like(target)
+            return target
+        # A deg/s^2 budget spent over one cycle of 1/rate seconds changes the
+        # per-cycle step by A / rate^2 degrees.
+        max_change = np.deg2rad(self.config.joint_acceleration_degrees / self.config.rate**2)
+        delta = np.clip(
+            target - self._commanded,
+            self._commanded_delta - max_change,
+            self._commanded_delta + max_change,
+        )
+        self._commanded = self._commanded + delta
+        self._commanded_delta = delta
+        return self._commanded.copy()
 
     def validate(self, target_radians: np.ndarray, *, check_jump: bool = True) -> None:
         """Validate target shape, finiteness, static limits, and sample jump.
@@ -426,6 +471,12 @@ class XArm6Hardware:
                 self._catching_up = not np.allclose(slewed, joints)
                 joints = slewed
             self.safety.validate(joints)
+            if self.config.mode == 1:
+                # Servo mode has no controller-side acceleration limit, so the
+                # equivalent bound is applied here. It runs after validation so
+                # that an impossible leader movement still faults on the raw
+                # target rather than being clamped into an acceptable one.
+                joints = self.safety.limit_acceleration(joints)
             code, at_limit = self.arm.is_joint_limit(joints.tolist(), is_radian=True)
             self._check_code("is_joint_limit", code)
             if at_limit is not False:
