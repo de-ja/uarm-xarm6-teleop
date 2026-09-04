@@ -102,7 +102,7 @@ class FakeFollower:
 
     @property
     def config_reference(self):
-        return (0.0, -75.0, 9.0, 0.0, 70.0, 0.0)
+        return (0.0, -75.0, 9.0, 0.0, 0.0, 0.0)
 
     def arm_motion(self, _target):
         self.armed = True
