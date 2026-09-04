@@ -23,6 +23,7 @@ from .remote_leader import RemoteLeaderTimeout
 from .protocol import (
     PROTOCOL_VERSION,
     ControllerEvent,
+    LatencyBreakdown,
     RuntimeCapabilities,
     TeleopMode,
     TeleopSnapshot,
@@ -30,6 +31,9 @@ from .protocol import (
     default_runtime_capabilities,
 )
 from .scheduling import PeriodicScheduler, RateMeter
+
+# Periodic sampling rate for the structured metrics log, in seconds.
+METRICS_INTERVAL_SECONDS = 1.0
 
 
 class TeleopControllerError(RuntimeError):
@@ -172,6 +176,9 @@ class TeleopController:
         self._loop_rate_hz = 0.0
         self._command_latency_ms: float | None = None
         self._last_sample_received: float | None = None
+        self._last_command_at: float | None = None
+        self._latency: LatencyBreakdown | None = None
+        self._video_clock: Callable[[], float | None] | None = None
         self._fault: str | None = None
         self._events: deque[ControllerEvent] = deque(maxlen=80)
         self._event("info", "Controller initialized; physical motion is disabled.")
@@ -191,6 +198,45 @@ class TeleopController:
                 self._event_sink.emit(self.session_id, event)
             except Exception:  # noqa: BLE001,S110 - logging cannot affect robot safety
                 pass
+
+    def _emit_metrics(self, mode: TeleopMode, timeouts: int) -> None:
+        """Send one periodic measurement sample to the structured log.
+
+        Args:
+            mode: Execution backend currently running.
+            timeouts: Cumulative tolerated leader timeouts this run.
+
+        Sampling happens on the control thread, but the sink only enqueues, so
+        a saturated or failing log can never delay a robot command.
+        """
+        sink = self._event_sink
+        if sink is None:
+            return
+        with self._lock:
+            latency = self._latency
+            payload: dict[str, object] = {
+                "timestamp": self._wall_time(),
+                "mode": mode,
+                "state": self._state.value,
+                "loop_rate_hz": self._loop_rate_hz,
+                "command_latency_ms": self._command_latency_ms,
+                "leader_timeouts": timeouts,
+            }
+        if latency is not None:
+            payload.update(
+                {
+                    "leader_round_trip_ms": latency.leader_round_trip_ms,
+                    "leader_read_ms": latency.leader_read_ms,
+                    "leader_network_ms": latency.leader_network_ms,
+                    "mapping_ms": latency.mapping_ms,
+                    "robot_command_ms": latency.robot_command_ms,
+                    "video_capture_lag_ms": latency.video_capture_lag_ms,
+                }
+            )
+        try:
+            sink.emit_metrics(self.session_id, payload)
+        except Exception:  # noqa: BLE001,S110 - logging cannot affect robot safety
+            pass
 
     def _require_state(self, *allowed: TeleopState) -> None:
         if self._state not in allowed:
@@ -233,6 +279,66 @@ class TeleopController:
             )
             self._monitor = monitor
             monitor.start()
+
+    def set_video_clock(self, source: Callable[[], float | None] | None) -> None:
+        """Attach a source of the newest camera frame's capture time.
+
+        Args:
+            source: Callable returning a capture time on this controller's
+                monotonic clock, or None when no frame is available. Passing
+                None detaches the source.
+
+        The controller only reads this while assembling telemetry, so a camera
+        manager can be attached and removed without touching the control loop.
+        """
+        with self._lock:
+            self._video_clock = source
+
+    def _breakdown(
+        self,
+        sample: LeaderSample,
+        *,
+        mapping_ms: float,
+        robot_command_ms: float | None,
+        total_ms: float,
+    ) -> LatencyBreakdown:
+        """Assemble one cycle's per-stage latency from its measured parts.
+
+        Args:
+            sample: Sample whose transport timing produced this cycle.
+            mapping_ms: Time spent mapping and validating the target.
+            robot_command_ms: Time spent inside the follower command, if any.
+            total_ms: Leader request to issued command.
+
+        Returns:
+            Breakdown carrying only stages that were actually measured.
+        """
+        timing = sample.timing
+        return LatencyBreakdown(
+            leader_round_trip_ms=None if timing is None else timing.round_trip_ms,
+            leader_read_ms=None if timing is None else timing.read_ms,
+            leader_network_ms=None if timing is None else timing.network_ms,
+            mapping_ms=mapping_ms,
+            robot_command_ms=robot_command_ms,
+            total_ms=total_ms,
+            video_capture_lag_ms=self._video_capture_lag_ms(),
+        )
+
+    def _video_capture_lag_ms(self) -> float | None:
+        """Return how far the newest camera frame trails the latest command.
+
+        Returns:
+            Milliseconds on this machine's clock, or None when no camera clock
+            source is attached. Both inputs come from the follower host, so the
+            value never depends on the browser's clock.
+        """
+        source = self._video_clock
+        if source is None or self._last_command_at is None:
+            return None
+        captured_at = source()
+        if captured_at is None:
+            return None
+        return max(0.0, (self._last_command_at - captured_at) * 1000.0)
 
     def _tolerate_leader_timeout(self, error: RemoteLeaderTimeout, misses: int) -> bool:
         """Decide whether one more consecutive leader timeout may be absorbed.
@@ -485,6 +591,8 @@ class TeleopController:
             self._fault = None
             self._loop_rate_hz = 0.0
             self._command_latency_ms = None
+            self._latency = None
+            self._last_command_at = None
             self._state = TeleopState.STARTING
             self._stop_event.clear()
             self._worker = threading.Thread(
@@ -535,7 +643,9 @@ class TeleopController:
             rate_meter = RateMeter(monotonic=self._monotonic)
             last_contact_state = False
             misses = 0
+            total_timeouts = 0
             catching_up = False
+            next_metrics_at = self._monotonic()
             while not self._stop_event.is_set():
                 with self._lock:
                     leader = self._leader
@@ -548,6 +658,7 @@ class TeleopController:
                     sample = leader.read()
                 except RemoteLeaderTimeout as error:
                     misses += 1
+                    total_timeouts += 1
                     if not self._tolerate_leader_timeout(error, misses):
                         raise
                     # No command is sent while blind. Configuration guarantees the
@@ -565,20 +676,29 @@ class TeleopController:
                     if mode == "physical" and follower is not None:
                         follower.begin_catch_up()
                     catching_up = True
+                mapping_started = self._monotonic()
                 self._update_sample(sample)
                 with self._lock:
                     assert self._action is not None
                     action = self._action.copy()
+                mapping_ms = (self._monotonic() - mapping_started) * 1000.0
 
                 if mode == "physical":
                     assert follower is not None
+                    command_started = self._monotonic()
                     follower.command(action, self.config.xarm6.gripper_command_max)
-                    command_latency_ms = max(
-                        0.0,
-                        (self._monotonic() - sample.timestamp) * 1000.0,
-                    )
+                    commanded_at = self._monotonic()
+                    robot_command_ms = (commanded_at - command_started) * 1000.0
+                    command_latency_ms = max(0.0, (commanded_at - sample.timestamp) * 1000.0)
                     with self._lock:
                         self._command_latency_ms = command_latency_ms
+                        self._last_command_at = commanded_at
+                        self._latency = self._breakdown(
+                            sample,
+                            mapping_ms=mapping_ms,
+                            robot_command_ms=robot_command_ms,
+                            total_ms=command_latency_ms,
+                        )
                     contact_state = follower.gripper_contact_latched
                     if contact_state and not last_contact_state:
                         self._event("warning", "G2 grasp detected; further closing is latched off.")
@@ -595,6 +715,10 @@ class TeleopController:
                 if measured_rate is not None:
                     with self._lock:
                         self._loop_rate_hz = measured_rate
+
+                if now >= next_metrics_at:
+                    self._emit_metrics(mode, total_timeouts)
+                    next_metrics_at = now + METRICS_INTERVAL_SECONDS
 
                 if mode == "physical" and follower is not None and now >= next_status_poll:
                     status = follower.inspect()
@@ -692,6 +816,8 @@ class TeleopController:
                 self._last_sample_received = None
                 self._loop_rate_hz = 0.0
                 self._command_latency_ms = None
+                self._latency = None
+                self._last_command_at = None
                 self._fault = None
                 self._physical_config = self.config.physical_xarm
                 self._mapping = make_mapping(self.config)
@@ -751,6 +877,7 @@ class TeleopController:
                 loop_rate_hz=self._loop_rate_hz,
                 command_latency_ms=self._command_latency_ms,
                 last_sample_age_ms=last_age,
+                latency=self._latency,
                 fault=self._fault,
                 events=tuple(self._events),
             )

@@ -137,9 +137,13 @@ class FakeEventSink:
     def __init__(self):
         self.records = []
         self.closed = False
+        self.metrics = []
 
     def emit(self, session_id, event):
         self.records.append((session_id, event))
+
+    def emit_metrics(self, session_id, metrics):
+        self.metrics.append((session_id, metrics))
 
     def close(self):
         self.closed = True
@@ -328,6 +332,27 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("leader sample failed", controller.snapshot().fault)
         controller.reset_fault()
         self.assertEqual(controller.state, TeleopState.IDLE)
+
+    def test_run_logs_periodic_metrics_with_stage_latencies(self):
+        sink = FakeEventSink()
+        controller = self.make_controller(event_sink=sink)
+        controller.connect_leader()
+        controller.inspect_robot("192.0.2.8")
+        controller.start("physical", confirmation="192.0.2.8")
+        self.wait_for_state(controller, TeleopState.RUNNING)
+        self.wait_for(lambda: bool(sink.metrics), "a metrics sample")
+        controller.stop()
+        controller.close()
+
+        session_id, sample = sink.metrics[0]
+        self.assertEqual(session_id, "test-session")
+        self.assertEqual(sample["mode"], "physical")
+        self.assertIn("loop_rate_hz", sample)
+        self.assertIn("leader_timeouts", sample)
+        # The fake leader reports no transport timing, so only the stages this
+        # process measured itself are present.
+        self.assertIsNotNone(sample["mapping_ms"])
+        self.assertIsNotNone(sample["robot_command_ms"])
 
     def test_run_absorbs_tolerated_leader_timeouts(self):
         # Three consecutive misses is exactly the configured budget.

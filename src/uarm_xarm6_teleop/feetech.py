@@ -37,12 +37,27 @@ class FeetechError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class LeaderTiming:
+    """Break one leader read into the stages that produced it.
+
+    All values are milliseconds measured on the machine that owns the stage, so
+    none of them depend on two clocks agreeing. ``network_ms`` is derived rather
+    than observed: it is whatever the round trip did not spend reading serial.
+    """
+
+    read_ms: float
+    round_trip_ms: float | None = None
+    network_ms: float | None = None
+
+
+@dataclass(frozen=True)
 class LeaderSample:
     """Represent one complete timestamped sample from the seven leader servos."""
 
     timestamp: float
     positions: tuple[int, ...]
     radians: np.ndarray
+    timing: LeaderTiming | None = None
 
     @property
     def degrees(self) -> np.ndarray:
@@ -127,7 +142,9 @@ class FeetechLeader:
         Returns:
             Monotonic timestamp, raw positions, and calibrated radians.
         """
+        started_at = time.monotonic()
         positions = self.read_positions()
+        read_ms = (time.monotonic() - started_at) * 1000.0
         radians = positions_to_radians(
             positions,
             self.leader_config.midpoint,
@@ -138,7 +155,12 @@ class FeetechLeader:
             self.leader_config.gripper_zero_position,
             [self.leader_config.directions[6]],
         )[0]
-        return LeaderSample(time.monotonic(), positions, radians)
+        return LeaderSample(
+            time.monotonic(),
+            positions,
+            radians,
+            timing=LeaderTiming(read_ms=read_ms),
+        )
 
     def close(self) -> None:
         """Close the serial port if it is open."""

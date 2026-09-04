@@ -152,6 +152,10 @@ def create_app(
         capabilities=detect_runtime_capabilities(),
     )
     active_cameras = camera_manager or CameraManager()
+    # Both inputs come from this host, so video freshness can be compared with
+    # robot commands without depending on the browser's clock. The clock is an
+    # optional telemetry source, so a camera backend without it still works.
+    active_controller.set_video_clock(getattr(active_cameras, "newest_capture_monotonic", None))
     telemetry_clients = TelemetryClients(
         active_controller,
         grace_seconds=active_controller.config.wireless.browser_grace_seconds,

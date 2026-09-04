@@ -8,7 +8,7 @@ from typing import Literal
 
 from .backends.xarm import XArmStatus
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 LeaderTransport = Literal["local", "remote_explicit", "remote_browser_pairing"]
 TeleopMode = Literal["dry_run", "simulation", "physical"]
 
@@ -53,6 +53,27 @@ def default_runtime_capabilities() -> RuntimeCapabilities:
 
 
 @dataclass(frozen=True)
+class LatencyBreakdown:
+    """Attribute one control cycle's latency to the stage that produced it.
+
+    Every field is milliseconds measured on the machine that owns the stage, so
+    none of them depend on the laptop and follower clocks agreeing.
+    ``leader_network_ms`` is derived from the round trip minus the laptop's
+    reported serial time, and is None when the laptop does not report it.
+    ``video_capture_lag_ms`` is how far the newest camera frame trails the most
+    recent robot command, both taken from the follower's own clock.
+    """
+
+    leader_round_trip_ms: float | None
+    leader_read_ms: float | None
+    leader_network_ms: float | None
+    mapping_ms: float | None
+    robot_command_ms: float | None
+    total_ms: float | None
+    video_capture_lag_ms: float | None
+
+
+@dataclass(frozen=True)
 class ControllerEvent:
     """Represent one timestamped operator-visible controller event."""
 
@@ -82,6 +103,7 @@ class TeleopSnapshot:
     loop_rate_hz: float
     command_latency_ms: float | None
     last_sample_age_ms: float | None
+    latency: LatencyBreakdown | None
     fault: str | None
     events: tuple[ControllerEvent, ...]
 
