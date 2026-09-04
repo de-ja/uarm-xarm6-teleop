@@ -34,6 +34,10 @@ from .scheduling import PeriodicScheduler, RateMeter
 
 # Periodic sampling rate for the structured metrics log, in seconds.
 METRICS_INTERVAL_SECONDS = 1.0
+# A loop running below this fraction of its configured rate is reported once.
+# In servo mode the rate is what turns a per-sample jump limit into a velocity
+# limit, so a silent shortfall degrades tracking with no other visible symptom.
+LOOP_RATE_WARNING_FRACTION = 0.8
 
 
 class TeleopControllerError(RuntimeError):
@@ -641,6 +645,8 @@ class TeleopController:
             scheduler = PeriodicScheduler(rate, monotonic=self._monotonic)
             next_status_poll = self._monotonic()
             rate_meter = RateMeter(monotonic=self._monotonic)
+            configured_rate = rate
+            reported_slow_loop = False
             last_contact_state = False
             misses = 0
             total_timeouts = 0
@@ -715,6 +721,19 @@ class TeleopController:
                 if measured_rate is not None:
                     with self._lock:
                         self._loop_rate_hz = measured_rate
+
+                if measured_rate is not None:
+                    rate_is_short = measured_rate < configured_rate * LOOP_RATE_WARNING_FRACTION
+                    if rate_is_short and not reported_slow_loop:
+                        reported_slow_loop = True
+                        self._event(
+                            "warning",
+                            f"Control loop is running at {measured_rate:.1f} Hz against a "
+                            f"configured {configured_rate:.0f} Hz; tracking will lag",
+                        )
+                    elif reported_slow_loop and not rate_is_short:
+                        reported_slow_loop = False
+                        self._event("info", f"Control loop recovered to {measured_rate:.1f} Hz")
 
                 if now >= next_metrics_at:
                     self._emit_metrics(mode, total_timeouts)
