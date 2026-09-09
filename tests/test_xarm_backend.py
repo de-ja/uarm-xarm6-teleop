@@ -451,5 +451,124 @@ class ServoModeTests(unittest.TestCase):
         backend.close()
 
 
+class AccelerationLimitTests(unittest.TestCase):
+    """Cover the software acceleration bound that replaces mvacc in mode 1."""
+
+    def setUp(self):
+        base = load_config().physical_xarm
+        self.config = replace(
+            base,
+            robot_ip="192.0.2.1",
+            watchdog_timeout=10.0,
+            mode=1,
+            rate=100.0,
+            max_target_jump_degrees=1.5,
+            catchup_step_degrees=0.8,
+            joint_acceleration_degrees=1145.0,
+        )
+        self.reference = np.deg2rad([0.0, -75.0, 10.0, 0.0, 60.0, 0.0])
+        # A deg/s^2 over one 1/rate cycle changes the step by A / rate^2 degrees.
+        self.max_change = self.config.joint_acceleration_degrees / self.config.rate**2
+
+    def feed(self, safety, steps_degrees, elapsed=None):
+        """Drive the limiter with a sequence of per-sample raw leader steps on J1.
+
+        Mirrors the production order: the raw target is validated, then the
+        commanded stream is shaped.
+        """
+        period = 1.0 / self.config.rate if elapsed is None else elapsed
+        safety.reset(self.reference)
+        applied = []
+        raw = self.reference.copy()
+        for step in steps_degrees:
+            raw = raw.copy()
+            raw[0] += np.deg2rad(step)
+            safety.validate(raw)
+            limited = safety.limit_acceleration(raw, period)
+            applied.append(float(np.rad2deg(limited[0] - self.reference[0])))
+        return applied
+
+    def test_steady_motion_is_not_altered(self):
+        safety = TargetSafety(self.config)
+        # A constant step is zero acceleration, so nothing should be clamped.
+        positions = self.feed(safety, [0.05] * 5)
+        np.testing.assert_allclose(positions, [0.05, 0.10, 0.15, 0.20, 0.25], atol=1e-9)
+
+    def test_a_hard_reversal_cannot_exceed_one_acceleration_step(self):
+        safety = TargetSafety(self.config)
+        # Every raw step is inside max_target_jump_degrees, so nothing faults,
+        # but reversing direction implies a 2 deg change of velocity in one
+        # cycle. The commanded stream must decelerate through zero instead.
+        positions = self.feed(safety, [1.0, 1.0, 1.0, -1.0, -1.0, -1.0])
+        # The first commanded sample establishes the baseline and is not shaped.
+        steps = np.diff([0.0] + positions)[1:]
+        for earlier, later in zip(steps, steps[1:]):
+            self.assertLessEqual(abs(later - earlier), self.max_change + 1e-9)
+
+    def test_limiting_does_not_mask_a_jump_fault(self):
+        # The limiter shapes the commanded stream; it must not rescue a raw
+        # target that exceeds the jump limit, which is the guard against a
+        # dropped leader link in servo mode.
+        safety = TargetSafety(self.config)
+        safety.reset(self.reference)
+        target = self.reference.copy()
+        target[0] += np.deg2rad(self.config.max_target_jump_degrees + 1.0)
+        with self.assertRaisesRegex(XArmHardwareError, "jumped"):
+            safety.validate(target)
+
+    def test_a_standing_start_ramps_instead_of_stepping(self):
+        safety = TargetSafety(self.config)
+        positions = self.feed(safety, [0.0, 1.4, 1.4, 1.4])
+        steps = np.diff([0.0] + positions)
+        # Each successive step may only grow by one acceleration budget.
+        for earlier, later in zip(steps, steps[1:]):
+            self.assertLessEqual(later - earlier, self.max_change + 1e-9)
+        self.assertLess(steps[-1], 1.4)
+
+    def test_planning_mode_leaves_the_target_untouched(self):
+        # Mode 6 gets its acceleration bound from the controller, so applying a
+        # second one here would only add avoidable lag.
+        config = replace(self.config, mode=6, rate=50.0, max_target_jump_degrees=5.0)
+        fake = FakeArm("192.0.2.1", joints=self.reference)
+        backend = XArm6Hardware(config, api_factory=lambda *_a, **_k: fake)
+        backend.arm_motion(self.reference)
+        backend.command(np.concatenate([self.reference, [0.0]]), gripper_command_max=0.81)
+        target = self.reference.copy()
+        target[0] += np.deg2rad(4.0)
+        backend.command(np.concatenate([target, [0.0]]), gripper_command_max=0.81)
+        backend.close()
+
+        sent = [c for c in fake.calls if c[0] == "set_servo_angle"][-1]
+        self.assertAlmostEqual(np.rad2deg(sent[1]["angle"][0]), np.rad2deg(target[0]), places=6)
+
+    def test_a_late_cycle_is_granted_the_budget_it_had_time_for(self):
+        # Twice the period is twice the acceleration budget, so the commanded
+        # step grows by 4x: the budget doubles and it applies over twice as long.
+        nominal = TargetSafety(self.config)
+        late = TargetSafety(self.config)
+        period = 1.0 / self.config.rate
+        on_time = self.feed(nominal, [0.0, 1.4], elapsed=period)
+        delayed = self.feed(late, [0.0, 1.4], elapsed=2 * period)
+        self.assertAlmostEqual(delayed[1], on_time[1] * 4.0, places=6)
+
+    def test_a_long_stall_cannot_bank_unlimited_budget(self):
+        # A cycle 100x late is credited only the capped number of periods, so a
+        # stalled loop cannot release a huge step when it resumes.
+        safety = TargetSafety(self.config)
+        period = 1.0 / self.config.rate
+        stalled = self.feed(safety, [0.0, 1.4], elapsed=100 * period)
+        capped = self.feed(TargetSafety(self.config), [0.0, 1.4], elapsed=4 * period)
+        self.assertAlmostEqual(stalled[1], capped[1], places=9)
+
+    def test_jitter_below_the_period_does_not_shrink_the_budget(self):
+        # Crediting less than a nominal period would make the arm sluggish for
+        # no safety gain, so short cycles are floored at the period.
+        safety = TargetSafety(self.config)
+        period = 1.0 / self.config.rate
+        short = self.feed(safety, [0.0, 1.4], elapsed=period / 10)
+        nominal = self.feed(TargetSafety(self.config), [0.0, 1.4], elapsed=period)
+        self.assertAlmostEqual(short[1], nominal[1], places=9)
+
+
 if __name__ == "__main__":
     unittest.main()
