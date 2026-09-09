@@ -72,3 +72,18 @@ gripper_closed_position = 0
 gripper_speed = 50
 gripper_force = 20
 gripper_max_step = 2
+
+# Auxiliary observation sensors. These are observations, never control inputs:
+# a sensor that fails is reported and ignored, and teleoperation continues.
+# Add one table per sensor. None are configured by default.
+#
+# Use a /dev/serial/by-id/ path, not /dev/ttyACM*. The U-ARM leader and a USB
+# CDC sensor both enumerate as ttyACM and the numbering depends on boot order,
+# so a bare node can silently point at the wrong device. Validation rejects it.
+#
+# [[sensors]]
+# kind = "eflesh"
+# name = "gripper_tactile"
+# port = "/dev/serial/by-id/usb-Adafruit_QT_Py_M0_XXXXXXXX-if00"
+# num_mags = 5           # 5 per board; 10 for two boards behind an I2C mux
+# fingers = ["left"]     # one name per board, in ascending mux channel order

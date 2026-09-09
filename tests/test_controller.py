@@ -7,6 +7,7 @@ import numpy as np
 
 from uarm_xarm6_teleop.backends.xarm import XArmStatus
 from uarm_xarm6_teleop.config import load_config
+from uarm_xarm6_teleop.sensors import SensorHub, SensorReading
 from uarm_xarm6_teleop.controller import (
     TeleopController,
     TeleopControllerError,
@@ -447,6 +448,76 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("leader sample failed", snapshot.fault)
         self.assertEqual(self.followers, [])
         controller.reset_fault()
+
+    def test_a_failing_sensor_never_faults_teleoperation(self):
+        # Sensors are observations, not control inputs. Losing one must cost a
+        # data stream, not stop the robot mid-grasp.
+        class ExplodingSensor:
+            name = "tactile"
+            labels = ("a",)
+
+            def start(self):
+                pass
+
+            def read_latest(self):
+                raise RuntimeError("transport wedged")
+
+            def close(self):
+                pass
+
+        sink = FakeEventSink()
+        controller = self.make_controller(event_sink=sink)
+        controller._sensors = SensorHub((ExplodingSensor(),))
+        controller.connect_leader()
+        controller.inspect_robot("192.0.2.8")
+        controller.start("physical", confirmation="192.0.2.8")
+        self.wait_for_state(controller, TeleopState.RUNNING)
+        self.wait_for(lambda: bool(sink.metrics), "a metrics sample")
+
+        self.assertEqual(controller.state, TeleopState.RUNNING)
+        controller.stop()
+        controller.close()
+
+        _session, sample = sink.metrics[-1]
+        self.assertEqual(sample["sensors_failed"], ["tactile"])
+
+    def test_sensor_readings_reach_the_metrics_stream(self):
+        class SteadySensor:
+            name = "tactile"
+            labels = ("left_middle_bx",)
+
+            def start(self):
+                pass
+
+            def read_latest(self):
+                return SensorReading(
+                    name="tactile",
+                    timestamp=1.0,
+                    source_timestamp=0.5,
+                    labels=self.labels,
+                    values=(12.5,),
+                )
+
+            def close(self):
+                pass
+
+        sink = FakeEventSink()
+        controller = self.make_controller(event_sink=sink)
+        controller._sensors = SensorHub((SteadySensor(),))
+        controller.connect_leader()
+        controller.inspect_robot("192.0.2.8")
+        controller.start("physical", confirmation="192.0.2.8")
+        self.wait_for_state(controller, TeleopState.RUNNING)
+        self.wait_for(lambda: bool(sink.metrics), "a metrics sample")
+        controller.stop()
+        controller.close()
+
+        _session, sample = sink.metrics[-1]
+        payload = sample["sensor.tactile"]
+        self.assertEqual(payload["values"], [12.5])
+        self.assertEqual(payload["labels"], ["left_middle_bx"])
+        # Both clocks travel so a recorder can align tactile against vision.
+        self.assertEqual(payload["source_timestamp"], 0.5)
 
     def test_a_loop_running_below_its_configured_rate_is_reported(self):
         # In servo mode the loop rate is what turns a per-sample jump limit into
