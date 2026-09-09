@@ -176,6 +176,64 @@ class ConfigTests(unittest.TestCase):
             path.write_text("[physical_xarm]\nmode = 6\nrate = 100.0\n")
             self.assertEqual(load_config(path).physical_xarm.mode, 6)
 
+    def test_no_sensors_are_configured_by_default(self):
+        self.assertEqual(load_config().sensors, ())
+
+    def test_a_sensor_table_is_parsed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text(
+                "[[sensors]]\n"
+                'kind = "eflesh"\n'
+                'name = "gripper_tactile"\n'
+                'port = "/dev/serial/by-id/usb-Adafruit_QT_Py_M0_TEST-if00"\n'
+                "num_mags = 10\n"
+                'fingers = ["left", "right"]\n'
+            )
+            sensors = load_config(path).sensors
+        self.assertEqual(len(sensors), 1)
+        self.assertEqual(sensors[0].kind, "eflesh")
+        self.assertEqual(sensors[0].fingers, ("left", "right"))
+
+    def test_a_bare_tty_node_is_rejected_for_a_sensor(self):
+        # The leader and a USB CDC sensor both enumerate as ttyACM, and the
+        # numbering depends on boot order, so a bare node is not safe.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text(
+                "[[sensors]]\n"
+                'kind = "eflesh"\n'
+                'name = "gripper_tactile"\n'
+                'port = "/dev/ttyACM1"\n'
+                "num_mags = 5\n"
+                'fingers = ["left"]\n'
+            )
+            with self.assertRaisesRegex(ValueError, "by-id"):
+                load_config(path)
+
+    def test_duplicate_sensor_names_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            entry = (
+                "[[sensors]]\n"
+                'kind = "eflesh"\n'
+                'name = "tactile"\n'
+                'port = "/dev/serial/by-id/usb-TEST-if00"\n'
+                "num_mags = 5\n"
+                'fingers = ["left"]\n'
+            )
+            path.write_text(entry + entry)
+            with self.assertRaisesRegex(ValueError, "Duplicate sensor name"):
+                load_config(path)
+
+    def test_an_overlay_replaces_the_sensor_list_outright(self):
+        # Merging entry-wise would make removing a sensor locally impossible,
+        # which is the common case when the hardware is not attached.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text('[serial]\ndevice = "/dev/test"\n')
+            self.assertEqual(load_config(path).sensors, ())
+
 
 if __name__ == "__main__":
     unittest.main()

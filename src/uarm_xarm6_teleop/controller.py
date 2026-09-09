@@ -15,7 +15,14 @@ import numpy as np
 
 from .backends.maniskill import ManiSkillXArm6
 from .backends.xarm import TargetSafety, XArm6Hardware, XArmHardwareError, XArmStatus
-from .config import LeaderConfig, PhysicalXArmConfig, SerialConfig, TeleopConfig, validate_config
+from .config import (
+    LeaderConfig,
+    PhysicalXArmConfig,
+    SensorConfig,
+    SerialConfig,
+    TeleopConfig,
+    validate_config,
+)
 from .feetech import FeetechLeader, LeaderSample
 from .event_log import EventSink
 from .mapping import XArm6Mapping
@@ -31,6 +38,7 @@ from .protocol import (
     default_runtime_capabilities,
 )
 from .scheduling import PeriodicScheduler, RateMeter
+from .sensors import SensorHub, build_sensor_hub
 
 # Periodic sampling rate for the structured metrics log, in seconds.
 METRICS_INTERVAL_SECONDS = 1.0
@@ -79,6 +87,7 @@ class _Simulator(Protocol):
 LeaderFactory = Callable[[SerialConfig, LeaderConfig], _Leader]
 FollowerFactory = Callable[[PhysicalXArmConfig], _Follower]
 SimulationFactory = Callable[[str], _Simulator]
+SensorHubFactory = Callable[[tuple[SensorConfig, ...]], SensorHub]
 
 
 def make_mapping(config: TeleopConfig) -> XArm6Mapping:
@@ -126,6 +135,7 @@ class TeleopController:
         leader_factory: Factory for a local or remote U-ARM reader.
         follower_factory: Factory for the physical xArm backend.
         simulation_factory: Factory for the visible simulation backend.
+        sensor_hub_factory: Factory for auxiliary observation sensors.
         monotonic: Clock used for scheduling and latency measurement.
         wall_time: Clock used for operator-visible timestamps.
         capabilities: Deployment features exposed in every telemetry snapshot.
@@ -140,6 +150,7 @@ class TeleopController:
         leader_factory: LeaderFactory = FeetechLeader,
         follower_factory: FollowerFactory = XArm6Hardware,
         simulation_factory: SimulationFactory = ManiSkillXArm6,
+        sensor_hub_factory: SensorHubFactory = build_sensor_hub,
         monotonic: Callable[[], float] = time.monotonic,
         wall_time: Callable[[], float] = time.time,
         capabilities: RuntimeCapabilities | None = None,
@@ -170,6 +181,10 @@ class TeleopController:
         self._mapping = make_mapping(config)
         self._safety = TargetSafety(config.physical_xarm)
         self._physical_config = config.physical_xarm
+        # Auxiliary observation sensors. The hub is total: construction and
+        # every later call report failures instead of raising, so an unplugged
+        # or wedged accessory can never fault a teleoperation run.
+        self._sensors: SensorHub = sensor_hub_factory(config.sensors)
         self._sample: LeaderSample | None = None
         self._action: np.ndarray | None = None
         self._robot_status: XArmStatus | None = None
@@ -222,6 +237,18 @@ class TeleopController:
                 "command_latency_ms": self._command_latency_ms,
                 "leader_timeouts": timeouts,
             }
+        # Read outside the lock: a sensor read must never hold the state lock
+        # that robot commands contend for. Reads are non-blocking snapshots of
+        # a background acquirer, and the hub absorbs any failure.
+        for reading in self._sensors.read_all().values():
+            payload[f"sensor.{reading.name}"] = {
+                "timestamp": reading.timestamp,
+                "source_timestamp": reading.source_timestamp,
+                "labels": list(reading.labels),
+                "values": list(reading.values),
+            }
+        if self._sensors.failed:
+            payload["sensors_failed"] = list(self._sensors.failed)
         if latency is not None:
             payload.update(
                 {
@@ -634,6 +661,11 @@ class TeleopController:
             with self._lock:
                 self._state = TeleopState.RUNNING
             self._event("info", f"Teleoperation is running in {mode.replace('_', ' ')} mode.")
+            # Idempotent, so a second run in the same session does not restart
+            # an acquirer that has already been joined.
+            self._sensors.start()
+            for failed in self._sensors.failed:
+                self._event("warning", f"Sensor {failed} is unavailable; continuing without it")
 
             rate = (
                 self.config.simulation.rate if mode == "simulation" else self._physical_config.rate
@@ -889,6 +921,8 @@ class TeleopController:
         except Exception:  # noqa: BLE001,S110 - process shutdown is best-effort
             # Shutdown remains best-effort; the hardware backend already requests state 4.
             pass
+        # Sensors outlive individual runs, so they are released with the owner.
+        self._sensors.close()
         with self._lock:
             sink = None if self._event_sink_closed else self._event_sink
             self._event_sink_closed = True

@@ -114,6 +114,21 @@ class PhysicalXArmConfig:
 
 
 @dataclass(frozen=True)
+class SensorConfig:
+    """Describe one auxiliary observation sensor.
+
+    Sensors are observations, never control inputs, so a failure here degrades
+    telemetry rather than stopping the robot.
+    """
+
+    kind: str
+    name: str
+    port: str
+    num_mags: int
+    fingers: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class TeleopConfig:
     """Collect the validated configuration for every teleoperation component."""
 
@@ -122,6 +137,7 @@ class TeleopConfig:
     xarm6: XArm6Config
     simulation: SimulationConfig
     wireless: WirelessConfig
+    sensors: tuple[SensorConfig, ...]
     physical_xarm: PhysicalXArmConfig
 
 
@@ -129,6 +145,13 @@ def _section(data: dict, name: str) -> dict:
     value = data.get(name, {})
     if not isinstance(value, dict):
         raise ValueError(f"[{name}] must be a TOML table")
+    return value
+
+
+def _sensor_tables(data: dict) -> list[dict]:
+    value = data.get("sensors", [])
+    if not isinstance(value, list) or any(not isinstance(entry, dict) for entry in value):
+        raise ValueError("[[sensors]] must be an array of TOML tables")
     return value
 
 
@@ -238,6 +261,25 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
         for lower, upper in zip(physical.joint_lower_degrees, physical.joint_upper_degrees)
     ):
         raise ValueError("physical_xarm lower joint limits must be below upper limits")
+    seen_sensor_names: set[str] = set()
+    for sensor in config.sensors:
+        if not sensor.name:
+            raise ValueError("Each [[sensors]] entry needs a name")
+        if sensor.name in seen_sensor_names:
+            raise ValueError(f"Duplicate sensor name '{sensor.name}'")
+        seen_sensor_names.add(sensor.name)
+        if not sensor.port:
+            raise ValueError(f"Sensor '{sensor.name}' needs a port")
+        # Both the leader and a USB CDC sensor enumerate as /dev/ttyACM*, and
+        # the numbering depends on boot order, so a bare node can silently point
+        # at the wrong device. by-id paths are stable across reboots.
+        if sensor.port.startswith("/dev/ttyACM"):
+            raise ValueError(
+                f"Sensor '{sensor.name}' must use a stable /dev/serial/by-id/ path "
+                "rather than a bare /dev/ttyACM node, which moves between boots"
+            )
+        if sensor.num_mags <= 0:
+            raise ValueError(f"Sensor '{sensor.name}' needs a positive num_mags")
     if physical.gripper_kind not in GRIPPER_LIMITS:
         raise ValueError(
             "physical_xarm.gripper_kind must be one of " + ", ".join(sorted(GRIPPER_LIMITS))
@@ -289,6 +331,14 @@ def load_config(path: str | Path | None = None) -> TeleopConfig:
         data = {}
         for name in ("serial", "leader", "xarm6", "simulation", "wireless", "physical_xarm"):
             data[name] = {**_section(base_data, name), **_section(override_data, name)}
+        # An overlay that declares sensors replaces the list outright. Merging
+        # entry-wise would make it impossible to remove a sensor locally, which
+        # is the common case when hardware is not attached.
+        data["sensors"] = (
+            _sensor_tables(override_data)
+            if "sensors" in override_data
+            else _sensor_tables(base_data)
+        )
 
     serial = _section(data, "serial")
     leader = _section(data, "leader")
@@ -296,6 +346,16 @@ def load_config(path: str | Path | None = None) -> TeleopConfig:
     simulation = _section(data, "simulation")
     wireless = _section(data, "wireless")
     physical_xarm = _section(data, "physical_xarm")
+    sensors = tuple(
+        SensorConfig(
+            kind=str(entry.get("kind", "")),
+            name=str(entry.get("name", "")),
+            port=str(entry.get("port", "")),
+            num_mags=int(entry.get("num_mags", 0)),
+            fingers=tuple(str(value) for value in entry.get("fingers", ())),
+        )
+        for entry in _sensor_tables(data)
+    )
 
     config = TeleopConfig(
         serial=SerialConfig(
@@ -323,6 +383,7 @@ def load_config(path: str | Path | None = None) -> TeleopConfig:
             scene=str(simulation["scene"]),
             rate=float(simulation["rate"]),
         ),
+        sensors=sensors,
         wireless=WirelessConfig(
             leader_timeout=float(wireless["leader_timeout"]),
             leader_max_consecutive_timeouts=int(wireless["leader_max_consecutive_timeouts"]),
