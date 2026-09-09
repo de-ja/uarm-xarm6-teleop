@@ -275,8 +275,10 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
         # at the wrong device. by-id paths are stable across reboots.
         if sensor.port.startswith("/dev/ttyACM"):
             raise ValueError(
-                f"Sensor '{sensor.name}' must use a stable /dev/serial/by-id/ path "
-                "rather than a bare /dev/ttyACM node, which moves between boots"
+                f"Sensor '{sensor.name}' must not use a bare /dev/ttyACM node, whose "
+                "number depends on boot order. Use a usb: selector such as "
+                "usb:serial=XXXX, or a /dev/serial/by-id/ path. Run uarm-ports to list "
+                "attached devices and their selectors."
             )
         if sensor.num_mags <= 0:
             raise ValueError(f"Sensor '{sensor.name}' needs a positive num_mags")

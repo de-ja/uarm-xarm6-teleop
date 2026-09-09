@@ -77,13 +77,18 @@ gripper_max_step = 2
 # a sensor that fails is reported and ignored, and teleoperation continues.
 # Add one table per sensor. None are configured by default.
 #
-# Use a /dev/serial/by-id/ path, not /dev/ttyACM*. The U-ARM leader and a USB
-# CDC sensor both enumerate as ttyACM and the numbering depends on boot order,
-# so a bare node can silently point at the wrong device. Validation rejects it.
+# Identify the device by what it is, not by where it landed. The U-ARM leader
+# and a USB CDC sensor both enumerate as ttyACM and the numbering depends on
+# boot order, so a bare node can silently point at the wrong device.
+#   usb:serial=XXXX            one physical unit, survives reboots and replugs
+#   usb:vid=239a,pid=800f      any board of that type, if only one is attached
+#   usb:product=QT Py          substring match on the USB product string
+# Criteria combine with AND, and an ambiguous selector is an error rather than a
+# guess. Run uarm-ports to list attached devices and their selectors.
 #
 # [[sensors]]
 # kind = "eflesh"
 # name = "gripper_tactile"
-# port = "/dev/serial/by-id/usb-Adafruit_QT_Py_M0_XXXXXXXX-if00"
+# port = "usb:serial=XXXXXXXXXXXX"   # run uarm-ports to find this
 # num_mags = 5           # 5 per board; 10 for two boards behind an I2C mux
 # fingers = ["left"]     # one name per board, in ascending mux channel order

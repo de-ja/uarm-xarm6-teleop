@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from types import TracebackType
@@ -11,6 +12,10 @@ import numpy as np
 
 from .config import LeaderConfig, SerialConfig
 from .mapping import positions_to_radians
+from .serial_ports import SerialPortError, list_usb_serial_ports, resolve_serial_port
+
+
+_LOGGER = logging.getLogger(__name__)
 
 try:
     from scservo_sdk import (
@@ -71,7 +76,23 @@ class FeetechLeader:
     def __init__(self, serial: SerialConfig, leader: LeaderConfig) -> None:
         self.serial_config = serial
         self.leader_config = leader
-        self.port = PortHandler(serial.device)
+        try:
+            self.device = resolve_serial_port(serial.device)
+        except SerialPortError as error:
+            raise FeetechError(str(error)) from error
+        # A bare node is only risky when something else could have taken it.
+        # Both the leader and a USB CDC sensor enumerate as ttyACM, and the
+        # numbering depends on boot order.
+        if self.device.startswith(("/dev/ttyACM", "/dev/ttyUSB")):
+            attached = list_usb_serial_ports()
+            if len(attached) > 1:
+                _LOGGER.warning(
+                    "%s is a boot-order dependent node and %d USB serial devices are "
+                    "attached; prefer a usb: selector (run uarm-ports)",
+                    self.device,
+                    len(attached),
+                )
+        self.port = PortHandler(self.device)
         self.packet = PacketHandler(0)
         self.sync_read = GroupSyncRead(self.port, self.packet, STS_PRESENT_POSITION_L, 2)
         self.torque_enabled_ids: tuple[int, ...] = ()
@@ -85,9 +106,9 @@ class FeetechLeader:
         try:
             opened = self.port.openPort()
         except Exception as error:
-            raise FeetechError(f"Could not open {self.serial_config.device}: {error}") from error
+            raise FeetechError(f"Could not open {self.device}: {error}") from error
         if not opened:
-            raise FeetechError(f"Could not open {self.serial_config.device}")
+            raise FeetechError(f"Could not open {self.device}")
         if not self.port.setBaudRate(self.serial_config.baudrate):
             self.close()
             raise FeetechError(f"Could not set baud rate {self.serial_config.baudrate}")
