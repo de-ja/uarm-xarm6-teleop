@@ -315,16 +315,33 @@ def create_app(
         worker = threading.Thread(target=pump, name="tactile-display", daemon=True)
         worker.start()
 
+        disconnected = asyncio.Event()
+
         async def send_frames() -> None:
-            while True:
-                frame = await frames.get()
+            # Exits on its own rather than being cancelled. At display rates the
+            # socket is nearly always mid-send, and cancelling there leaves the
+            # connection half-written, which surfaces as a cancelled future in
+            # whatever is driving the client.
+            while not disconnected.is_set():
+                try:
+                    frame = await asyncio.wait_for(frames.get(), timeout=0.2)
+                except TimeoutError:
+                    continue
+                if disconnected.is_set():
+                    return
                 await websocket.send_json({"type": "frame", **frame})
 
         async def wait_for_disconnect() -> None:
-            while True:
-                message = await websocket.receive()
-                if message["type"] == "websocket.disconnect":
-                    return
+            try:
+                while True:
+                    message = await websocket.receive()
+                    if message["type"] == "websocket.disconnect":
+                        return
+            finally:
+                # Stop producing before releasing the sender, so it finds the
+                # flag set rather than one more queued frame.
+                stop_pump.set()
+                disconnected.set()
 
         sender = asyncio.create_task(send_frames())
         receiver = asyncio.create_task(wait_for_disconnect())
@@ -334,14 +351,19 @@ def create_app(
             )
             for task in completed:
                 await task
+            # Give the sender its own chance to finish the frame in flight.
+            await asyncio.wait({sender, receiver}, timeout=1.0)
         except (WebSocketDisconnect, RuntimeError):
             pass
         finally:
+            # Setting the flag is enough to retire the worker: the generator
+            # checks it every iteration and the thread is a daemon, so it
+            # cannot outlive the process.
             stop_pump.set()
+            disconnected.set()
             sender.cancel()
             receiver.cancel()
             await asyncio.gather(sender, receiver, return_exceptions=True)
-            await asyncio.to_thread(worker.join, 2.0)
 
     @app.websocket("/ws/telemetry")
     async def telemetry(
