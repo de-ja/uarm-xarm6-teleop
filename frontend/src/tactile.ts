@@ -73,7 +73,7 @@ export type TactileState =
  *  touching. Generous next to a 60 Hz stream so ordinary jitter never trips it. */
 export const STALE_AFTER_MS = 500;
 
-export function useTactile(frequency = 60) {
+export function useTactile(name: string | null, frequency = 60) {
   const [state, setState] = useState<TactileState>({ status: "connecting" });
   const retryRef = useRef(0);
   const lastFrameRef = useRef(0);
@@ -88,7 +88,7 @@ export function useTactile(frequency = 60) {
       if (disposed) return;
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       socket = new WebSocket(
-        `${protocol}//${window.location.host}/ws/tactile?frequency=${frequency}`,
+        `${protocol}//${window.location.host}/ws/tactile?frequency=${frequency}${name === null ? "" : `&name=${encodeURIComponent(name)}`}`,
       );
       socket.onmessage = (event) => {
         let message: TactileMessage;
@@ -144,7 +144,7 @@ export function useTactile(frequency = 60) {
       if (retryTimer !== null) window.clearTimeout(retryTimer);
       socket?.close(1000, "operator console closed");
     };
-  }, [frequency]);
+  }, [frequency, name]);
 
   return state;
 }

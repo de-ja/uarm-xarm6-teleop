@@ -43,6 +43,22 @@ class StubController:
     def set_video_clock(self, source):
         self.video_clock = source
 
+    def sensors(self):
+        return (
+            ()
+            if self.tactile is None
+            else (
+                __import__("uarm_xarm6_teleop.sensors", fromlist=["SensorInfo"]).SensorInfo(
+                    name=self.tactile.name,
+                    kind="eflesh_fake",
+                    view="tactile",
+                    started=True,
+                    sample_rate_hz=200.0,
+                    age_seconds=0.01,
+                ),
+            )
+        )
+
     def tactile_sensor(self, name=None):
         if self.tactile is None:
             return None

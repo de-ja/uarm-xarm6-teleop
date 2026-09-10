@@ -197,3 +197,5 @@ footer { padding: 13px 28px; display: flex; justify-content: space-between; colo
 .grip.stale .grip-value { color: var(--warning); }
 .tactile-detail > summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 4px 0; }
 .tactile-detail[open] > summary { margin-bottom: 10px; }
+.tactile-sensor { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+.tactile-sensor:first-of-type { border-top: none; }

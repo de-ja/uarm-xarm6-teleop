@@ -37,6 +37,34 @@ class SensorError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class SensorInfo:
+    """Describe one configured sensor for browser selection.
+
+    ``view`` names the frontend renderer this sensor's stream can drive, so a
+    console can offer a sensor it was not written against. A sensor with no view
+    still records; it simply has nothing to draw.
+    """
+
+    name: str
+    kind: str
+    view: str | None
+    started: bool
+    sample_rate_hz: float | None
+    age_seconds: float | None
+
+    def to_dict(self) -> dict[str, object]:
+        """Serialize the sensor for the HTTP API."""
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "view": self.view,
+            "started": self.started,
+            "sample_rate_hz": self.sample_rate_hz,
+            "age_seconds": self.age_seconds,
+        }
+
+
+@dataclass(frozen=True)
 class SensorReading:
     """One timestamped vector sample from an auxiliary observation source.
 
@@ -174,6 +202,9 @@ class EFleshTactileSensor:
     and a host that assumes the wrong width sits in its resync loop forever
     rather than raising, which is a hang rather than an error.
     """
+
+    #: Frontend renderer this sensor's stream can drive.
+    view = "tactile"
 
     def __init__(self, config: SensorConfig, source_factory: object | None = None) -> None:
         self._name = config.name
@@ -410,6 +441,36 @@ class SensorHub:
     def failed(self) -> tuple[str, ...]:
         """Return the identifiers of sensors dropped after an error."""
         return tuple(sorted(self._failed))
+
+    def describe(self, configs: tuple[SensorConfig, ...] = ()) -> tuple[SensorInfo, ...]:
+        """Describe every configured sensor, including any that failed.
+
+        Args:
+            configs: Configurations, used to report the kind of each sensor and
+                to list sensors that could not be constructed at all.
+
+        Returns:
+            One entry per configured sensor, in configuration order.
+        """
+        kinds = {config.name: config.kind for config in configs}
+        by_name = {source.name: source for source in self._sources}
+        names = list(kinds) or [source.name for source in self._sources]
+        described = []
+        for name in names:
+            source = by_name.get(name)
+            rate = getattr(source, "sample_rate_hz", None)
+            age = getattr(source, "age_seconds", None)
+            described.append(
+                SensorInfo(
+                    name=name,
+                    kind=kinds.get(name, ""),
+                    view=getattr(source, "view", None),
+                    started=source is not None and name not in self._failed,
+                    sample_rate_hz=None if rate is None else float(rate),
+                    age_seconds=age() if callable(age) else None,
+                )
+            )
+        return tuple(described)
 
     def source(self, name: str) -> SensorSource | None:
         """Return the live sensor with this name, or None if absent or failed.

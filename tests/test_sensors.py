@@ -371,5 +371,54 @@ class FullRateReaderTests(unittest.TestCase):
         self.assertGreater(len(drained), 20)
 
 
+class MultipleSensorTests(unittest.TestCase):
+    """Nothing may assume a particular number of sensors."""
+
+    def configs(self, *names):
+        return tuple(eflesh_config(kind="eflesh_fake", name=name) for name in names)
+
+    def test_two_sensors_are_both_listed_and_addressable(self):
+        hub = build_sensor_hub(self.configs("left_pad", "right_pad"))
+        hub.start()
+        try:
+            self.assertEqual(hub.names, ("left_pad", "right_pad"))
+            self.assertIsNotNone(hub.source("right_pad"))
+        finally:
+            hub.close()
+
+    def test_description_reports_kind_and_view_per_sensor(self):
+        configs = self.configs("left_pad", "right_pad")
+        hub = build_sensor_hub(configs)
+        hub.start()
+        try:
+            described = hub.describe(configs)
+            self.assertEqual([s.name for s in described], ["left_pad", "right_pad"])
+            # The view is what lets a console render a sensor it was not
+            # written against, so it must be declared rather than inferred.
+            self.assertEqual({s.view for s in described}, {"tactile"})
+            self.assertTrue(all(s.started for s in described))
+        finally:
+            hub.close()
+
+    def test_a_sensor_that_failed_is_still_described_as_not_started(self):
+        configs = (eflesh_config(kind="nosuch", name="broken"),)
+        hub = build_sensor_hub(configs)
+        described = hub.describe(configs)
+
+        # It must remain visible in the listing; a console that cannot see it
+        # cannot explain why its panel is empty.
+        self.assertEqual(len(described), 1)
+        self.assertFalse(described[0].started)
+        self.assertIsNone(described[0].view)
+
+    def test_describe_without_configs_falls_back_to_live_sources(self):
+        hub = build_sensor_hub(self.configs("only_pad"))
+        hub.start()
+        try:
+            self.assertEqual([s.name for s in hub.describe()], ["only_pad"])
+        finally:
+            hub.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -27,6 +27,7 @@ from ..controller import TeleopController, TeleopControllerError
 from ..feetech import FeetechError
 from ..protocol import RuntimeCapabilities, TeleopSnapshot
 from ..remote_leader import BrowserPairedRemoteLeaderFactory, RemoteLeaderError
+from ..sensors import SensorInfo
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -206,6 +207,11 @@ def create_app(
     @app.get("/api/cameras", response_model=list[CameraInfo])
     def cameras() -> list[dict[str, str]]:
         return [camera.to_dict() for camera in active_cameras.list_cameras()]
+
+    @app.get("/api/sensors", response_model=list[SensorInfo])
+    def sensors() -> list[dict[str, object]]:
+        """List configured sensors so the console can offer them for display."""
+        return [sensor.to_dict() for sensor in active_controller.sensors()]
 
     @app.get("/api/cameras/{camera_id}/stream")
     def camera_stream(camera_id: str) -> StreamingResponse:

@@ -45,6 +45,15 @@ export interface RuntimeCapabilities {
   max_robots: 1;
 }
 
+export interface SensorInfo {
+  name: string;
+  kind: string;
+  view: string | null;
+  started: boolean;
+  sample_rate_hz: number | null;
+  age_seconds: number | null;
+}
+
 export interface StartRequest {
   mode: "dry_run" | "simulation" | "physical";
   confirmation?: string | null;
