@@ -198,6 +198,22 @@ class EFleshDriverTests(unittest.TestCase):
 
 
 class RegistryTests(unittest.TestCase):
+    def test_a_synthetic_kind_is_available_for_the_console(self):
+        # Named distinctly so a generated feed cannot be mistaken for a
+        # measurement in configuration.
+        sensor = build_sensor(eflesh_config(kind="eflesh_fake"))
+        sensor.start()
+        try:
+            deadline = time.monotonic() + 2.0
+            reading = None
+            while reading is None and time.monotonic() < deadline:
+                reading = sensor.read_latest()
+                time.sleep(0.005)
+            self.assertIsNotNone(reading)
+            self.assertEqual(sensor.num_fingers, 2)
+        finally:
+            sensor.close()
+
     def test_eflesh_is_registered_under_its_kind(self):
         sensor = build_sensor(eflesh_config())
         self.assertIsInstance(sensor, EFleshTactileSensor)

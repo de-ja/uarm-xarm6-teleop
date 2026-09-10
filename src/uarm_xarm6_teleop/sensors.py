@@ -343,7 +343,29 @@ class EFleshTactileSensor:
         self._source._proc.set_baseline(samples)
 
 
-_SENSOR_DRIVERS: dict[str, type] = {"eflesh": EFleshTactileSensor}
+def _fake_eflesh_source(port: str, settle: float, name: str) -> object:
+    """Build a hardware-free eFlesh source, ignoring the transport settings."""
+    from eflesh import FakeEFleshSource
+
+    return FakeEFleshSource(num_fingers=2, name=name)
+
+
+class FakeEFleshTactileSensor(EFleshTactileSensor):
+    """Synthetic eFlesh sensor for exercising the console without hardware.
+
+    Same interface and the same derived signals, driven by generated data. Named
+    distinctly in configuration so a synthetic feed can never be mistaken for a
+    measurement.
+    """
+
+    def __init__(self, config: SensorConfig, source_factory: object | None = None) -> None:
+        super().__init__(config, source_factory=source_factory or _fake_eflesh_source)
+
+
+_SENSOR_DRIVERS: dict[str, type] = {
+    "eflesh": EFleshTactileSensor,
+    "eflesh_fake": FakeEFleshTactileSensor,
+}
 
 
 def build_sensor(config: SensorConfig) -> SensorSource:

@@ -189,6 +189,12 @@ class TeleopController:
         # every later call report failures instead of raising, so an unplugged
         # or wedged accessory can never fault a teleoperation run.
         self._sensors: SensorHub = sensor_hub_factory(config.sensors)
+        # Sensors are observations, independent of any run, and starting one can
+        # block for seconds while its baseline settles. Bring them up off-thread
+        # at construction so they are available while the operator is still
+        # setting up rather than only once teleoperation is running.
+        if self._sensors.names:
+            threading.Thread(target=self._sensors.start, name="sensor-startup", daemon=True).start()
         self._sample: LeaderSample | None = None
         self._action: np.ndarray | None = None
         self._robot_status: XArmStatus | None = None
