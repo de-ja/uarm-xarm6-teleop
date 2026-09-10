@@ -178,3 +178,22 @@ footer { padding: 13px 28px; display: flex; justify-content: space-between; colo
 .tactile-balance-track { position: relative; flex: 1; height: 10px; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
 .tactile-balance-centre { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--line); }
 .tactile-balance-fill { position: absolute; top: 0; bottom: 0; background: var(--accent); }
+
+/* Ambient grip readout. No absolute full scale exists in microtesla, so the
+   bar auto-ranges to the session peak and marks the contact threshold, which
+   is the one reference that means something. */
+.grip { display: flex; flex-direction: column; gap: 8px; }
+.grip-row { display: flex; align-items: center; gap: 10px; }
+.grip-track { position: relative; flex: 1; height: 14px; border: 1px solid var(--line); border-radius: 999px; background: rgba(8, 12, 15, .6); overflow: hidden; }
+.grip-fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); transition: width 60ms linear; }
+.grip-threshold { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--warning); opacity: .9; }
+.grip-peak { position: absolute; top: 0; bottom: 0; width: 1px; background: #e9edf0; opacity: .55; }
+.grip-centre { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--line); }
+.grip-balance { position: absolute; top: 0; bottom: 0; background: #8fd6ff; }
+.grip-value { min-width: 58px; text-align: right; font-size: 12px; color: var(--muted); }
+/* A stalled stream keeps its last reading, which looks exactly like a live
+   measurement. Draining the colour is the signal that it is not one. */
+.grip.stale .grip-fill, .grip.stale .grip-balance { background: #4a545b; }
+.grip.stale .grip-value { color: var(--warning); }
+.tactile-detail > summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 4px 0; }
+.tactile-detail[open] > summary { margin-bottom: 10px; }

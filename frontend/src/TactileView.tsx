@@ -1,15 +1,19 @@
-// Gripper tactile view: a pad per finger plus the pair-level readouts.
+// Gripper tactile view, in two tiers.
 //
-// Mirrors the desktop visualiser: per finger a pad outline, a circle per chip
-// sized by |dBz| and drawn hollow when negative, a shear vector per chip, a
-// centroid crosshair, and strip charts. Across the pair, a grip force readout
-// and a signed balance bar.
+// The ambient tier is one scalar an operator can read without looking directly
+// at it: grip force as a bar, with the contact threshold marked and the session
+// peak held, and the finger balance beside it. A bar rather than a dial because
+// length is judged more accurately than angle in peripheral vision.
+//
+// The diagnostic tier, behind a disclosure, mirrors the desktop visualiser: per
+// finger a pad outline, a circle per chip sized by |dBz| and hollow when
+// negative, a shear vector per chip, a centroid crosshair, and strip charts.
 //
 // Every geometric constant comes from the geometry frame. Nothing about chip
 // positions, pad size or the contact threshold is written here.
 
 import { useEffect, useRef } from "react";
-import type { TactileFinger, TactileGeometry, TactileState } from "./tactile";
+import type { TactileFinger, TactileFrame, TactileGeometry, TactileState } from "./tactile";
 
 const PAD_VIEW = 120;
 const CHART_POINTS = 120;
@@ -37,6 +41,76 @@ function Sparkline({ values, max, label }: { values: number[]; max: number; labe
       <svg viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`} preserveAspectRatio="none" aria-hidden>
         <polyline points={points} fill="none" stroke="currentColor" strokeWidth="1.5" />
       </svg>
+    </div>
+  );
+}
+
+
+/** Smallest full scale for the grip bar, as a multiple of the contact threshold.
+ *  Keeps the bar stable before anything has been gripped hard. */
+const GRIP_MIN_SCALE = 2;
+
+function GripGauge({
+  frame,
+  geometry,
+  stale,
+  peak,
+}: {
+  frame: TactileFrame;
+  geometry: TactileGeometry;
+  stale: boolean;
+  peak: number;
+}) {
+  const threshold = geometry.contact_threshold_ut;
+  // There is no meaningful full scale in microtesla, so rather than invent one
+  // the bar auto-ranges to the hardest grip seen this session. The end of the
+  // bar therefore means "the hardest you have gripped", which is honest and
+  // needs no calibration. The threshold tick is the one absolute reference.
+  const scale = Math.max(peak, threshold * GRIP_MIN_SCALE);
+  const pct = (value: number) => `${Math.min(Math.max(value / scale, 0), 1) * 100}%`;
+  const balance = frame.balance;
+
+  return (
+    <div className={stale ? "grip stale" : "grip"}>
+      <div className="grip-row">
+        <span className="tactile-chart-label">grip</span>
+        <div className="grip-track">
+          <div className="grip-fill" style={{ width: pct(frame.grip_force) }} />
+          <div className="grip-threshold" style={{ left: pct(threshold) }} title="contact threshold" />
+          <div className="grip-peak" style={{ left: pct(peak) }} title="session peak" />
+        </div>
+        <span className="grip-value">
+          {stale ? "—" : frame.any_contact ? "contact" : "clear"}
+        </span>
+      </div>
+
+      {/* grip_force is the mean of both fingers, so 0 and 1000 reads the same as
+          500 and 500. Without the asymmetry alongside it, the bar is misleading
+          during exactly the failure worth catching. */}
+      <div className="grip-row">
+        <span className="tactile-chart-label">balance</span>
+        {balance === null ? (
+          <span className="muted">single finger</span>
+        ) : (
+          <div className="grip-track balance">
+            <div className="grip-centre" />
+            <div
+              className="grip-balance"
+              style={{
+                left: balance < 0 ? `${50 + balance * 50}%` : "50%",
+                width: `${Math.min(Math.abs(balance), 1) * 50}%`,
+              }}
+            />
+          </div>
+        )}
+        <span className="grip-value">{balance === null || stale ? "—" : balance.toFixed(2)}</span>
+      </div>
+
+      {stale && (
+        <p className="inline-warning">
+          No tactile frames. The last reading is held and is not a measurement.
+        </p>
+      )}
     </div>
   );
 }
@@ -123,6 +197,9 @@ export function TactileView({ state }: { state: TactileState }) {
   const traces = useRef<Map<string, number[]>>(new Map());
 
   const frame = state.status === "live" ? state.frame : null;
+  const peakRef = useRef(0);
+  if (state.status === "live" && state.frame === null) peakRef.current = 0;
+  if (frame !== null && frame.grip_force > peakRef.current) peakRef.current = frame.grip_force;
   useEffect(() => {
     if (frame === null) return;
     frame.fingers.forEach((finger, index) => {
@@ -152,7 +229,15 @@ export function TactileView({ state }: { state: TactileState }) {
 
   return (
     <div className="tactile">
-      <div className="tactile-fingers">
+      <GripGauge
+        frame={frame}
+        geometry={geometry}
+        stale={state.stale}
+        peak={peakRef.current}
+      />
+      <details className="tactile-detail">
+        <summary>Per-finger detail</summary>
+        <div className="tactile-fingers">
         {frame.fingers.map((finger, index) => {
           const name = `Finger ${index + 1}`;
           return (
@@ -185,33 +270,9 @@ export function TactileView({ state }: { state: TactileState }) {
             </div>
           );
         })}
-      </div>
-
-      <div className="tactile-pair">
-        <div className="tactile-grip">
-          <span className="tactile-chart-label">grip force</span>
-          <strong>{frame.grip_force.toFixed(0)}</strong>
-          <span className="muted">µT, uncalibrated</span>
         </div>
-        {balance === null ? (
-          <p className="muted">Balance needs two fingers.</p>
-        ) : (
-          <div className="tactile-balance">
-            <span className="tactile-chart-label">balance</span>
-            <div className="tactile-balance-track">
-              <div className="tactile-balance-centre" />
-              <div
-                className="tactile-balance-fill"
-                style={{
-                  left: balance < 0 ? `${50 + balance * 50}%` : "50%",
-                  width: `${Math.min(Math.abs(balance), 1) * 50}%`,
-                }}
-              />
-            </div>
-            <span className="muted">{balance.toFixed(2)}</span>
-          </div>
-        )}
-      </div>
+      </details>
+
     </div>
   );
 }

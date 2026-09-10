@@ -59,11 +59,24 @@ type TactileMessage = TactileGeometry | TactileFrame | TactileUnavailable;
 export type TactileState =
   | { status: "connecting" }
   | { status: "unavailable"; reason: string }
-  | { status: "live"; geometry: TactileGeometry; frame: TactileFrame | null };
+  | {
+      status: "live";
+      geometry: TactileGeometry;
+      frame: TactileFrame | null;
+      /** True when frames have stopped arriving. A stalled sensor keeps its
+       *  last reading, which is indistinguishable from a live measurement of
+       *  the same value, so the view must be able to say "unknown" instead. */
+      stale: boolean;
+    };
+
+/** Frames older than this mean the stream has stopped, not that nothing is
+ *  touching. Generous next to a 60 Hz stream so ordinary jitter never trips it. */
+export const STALE_AFTER_MS = 500;
 
 export function useTactile(frequency = 60) {
   const [state, setState] = useState<TactileState>({ status: "connecting" });
   const retryRef = useRef(0);
+  const lastFrameRef = useRef(0);
 
   useEffect(() => {
     let disposed = false;
@@ -90,12 +103,14 @@ export function useTactile(frequency = 60) {
         }
         if (message.type === "geometry") {
           geometry = message;
-          setState({ status: "live", geometry: message, frame: null });
+          lastFrameRef.current = 0;
+          setState({ status: "live", geometry: message, frame: null, stale: false });
           return;
         }
         if (geometry !== null) {
           const known = geometry;
-          setState({ status: "live", geometry: known, frame: message });
+          lastFrameRef.current = Date.now();
+          setState({ status: "live", geometry: known, frame: message, stale: false });
         }
       };
       socket.onclose = () => {
@@ -112,7 +127,19 @@ export function useTactile(frequency = 60) {
     };
     connect();
 
+    // The socket can stay open while the producer behind it dies, so silence is
+    // detected here rather than reported by the backend.
+    const staleTimer = window.setInterval(() => {
+      const last = lastFrameRef.current;
+      if (last === 0) return;
+      if (Date.now() - last <= STALE_AFTER_MS) return;
+      setState((current) =>
+        current.status === "live" && !current.stale ? { ...current, stale: true } : current,
+      );
+    }, 200);
+
     return () => {
+      window.clearInterval(staleTimer);
       disposed = true;
       if (retryTimer !== null) window.clearTimeout(retryTimer);
       socket?.close(1000, "operator console closed");
