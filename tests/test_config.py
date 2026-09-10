@@ -186,14 +186,36 @@ class ConfigTests(unittest.TestCase):
                 "[[sensors]]\n"
                 'kind = "eflesh"\n'
                 'name = "gripper_tactile"\n'
-                'port = "/dev/serial/by-id/usb-Adafruit_QT_Py_M0_TEST-if00"\n'
-                "num_mags = 10\n"
-                'fingers = ["left", "right"]\n'
+                'port = "usb:serial=TEST"\n'
+                "settle = 7.5\n"
             )
             sensors = load_config(path).sensors
         self.assertEqual(len(sensors), 1)
         self.assertEqual(sensors[0].kind, "eflesh")
-        self.assertEqual(sensors[0].fingers, ("left", "right"))
+        self.assertEqual(sensors[0].settle, 7.5)
+
+    def test_settle_defaults_rather_than_being_required(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text(
+                '[[sensors]]\nkind = "eflesh"\nname = "gripper_tactile"\nport = "usb:serial=TEST"\n'
+            )
+            self.assertEqual(load_config(path).sensors[0].settle, 5.0)
+
+    def test_a_zero_settle_is_rejected(self):
+        # A baseline captured before the sensor settles reads several times
+        # noisier than the true floor, and nothing downstream can detect it.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text(
+                "[[sensors]]\n"
+                'kind = "eflesh"\n'
+                'name = "gripper_tactile"\n'
+                'port = "usb:serial=TEST"\n'
+                "settle = 0.0\n"
+            )
+            with self.assertRaisesRegex(ValueError, "positive settle"):
+                load_config(path)
 
     def test_a_bare_tty_node_is_rejected_for_a_sensor(self):
         # The leader and a USB CDC sensor both enumerate as ttyACM, and the
@@ -201,27 +223,15 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.toml"
             path.write_text(
-                "[[sensors]]\n"
-                'kind = "eflesh"\n'
-                'name = "gripper_tactile"\n'
-                'port = "/dev/ttyACM1"\n'
-                "num_mags = 5\n"
-                'fingers = ["left"]\n'
+                '[[sensors]]\nkind = "eflesh"\nname = "gripper_tactile"\nport = "/dev/ttyACM1"\n'
             )
-            with self.assertRaisesRegex(ValueError, "by-id"):
+            with self.assertRaisesRegex(ValueError, "usb: selector"):
                 load_config(path)
 
     def test_duplicate_sensor_names_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.toml"
-            entry = (
-                "[[sensors]]\n"
-                'kind = "eflesh"\n'
-                'name = "tactile"\n'
-                'port = "/dev/serial/by-id/usb-TEST-if00"\n'
-                "num_mags = 5\n"
-                'fingers = ["left"]\n'
-            )
+            entry = '[[sensors]]\nkind = "eflesh"\nname = "tactile"\nport = "usb:serial=TEST"\n'
             path.write_text(entry + entry)
             with self.assertRaisesRegex(ValueError, "Duplicate sensor name"):
                 load_config(path)

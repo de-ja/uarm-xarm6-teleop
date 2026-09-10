@@ -14,6 +14,8 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+
+import numpy as np
 from typing import Protocol, runtime_checkable
 
 from .config import SensorConfig
@@ -21,14 +23,6 @@ from .serial_ports import resolve_serial_port
 
 
 _LOGGER = logging.getLogger(__name__)
-
-# eFlesh streams magnetometers in physical position order, not address order.
-EFLESH_POSITIONS = ("middle", "left", "right", "top", "bottom")
-EFLESH_AXES = ("bx", "by", "bz")
-EFLESH_MAGS_PER_BOARD = len(EFLESH_POSITIONS)
-# A failed magnetometer read surfaces as raw 0xFFFF converted, 78640.8 uT. Full
-# scale is 126.9 mT on Z, so nothing legitimate approaches this.
-EFLESH_INVALID_MICROTESLA = 50000.0
 
 
 class SensorError(RuntimeError):
@@ -76,64 +70,35 @@ class SensorSource(Protocol):
         """Release the transport and stop acquiring."""
 
 
-def eflesh_labels(num_mags: int, fingers: tuple[str, ...]) -> tuple[str, ...]:
-    """Build one label per streamed value for an eFlesh configuration.
+class EFleshTactileSensor:
+    """Adapt the eflesh package's source to the auxiliary sensor interface.
 
-    Args:
-        num_mags: Total magnetometers across all boards, five per board.
-        fingers: Name for each board, in ascending mux channel order.
+    Acquisition, resync framing, baselining and the derived tactile signals all
+    live in the ``eflesh`` package and are deliberately not reimplemented here.
+    This class does two things: it converts an eFlesh reading into the flat
+    :class:`SensorReading` the hub records, and it exposes the display payloads
+    the web layer needs, so that layer never imports eflesh internals or copies
+    its hand-verified geometry constants.
 
-    Returns:
-        ``finger_position_axis`` labels ordered to match the value stream.
-
-    Raises:
-        SensorError: If the magnetometer count and finger names disagree.
-    """
-    if num_mags <= 0 or num_mags % EFLESH_MAGS_PER_BOARD:
-        raise SensorError(f"eFlesh num_mags must be a positive multiple of {EFLESH_MAGS_PER_BOARD}")
-    boards = num_mags // EFLESH_MAGS_PER_BOARD
-    if len(fingers) != boards:
-        raise SensorError(
-            f"eFlesh num_mags={num_mags} implies {boards} board(s), but "
-            f"{len(fingers)} finger name(s) were configured"
-        )
-    return tuple(
-        f"{finger}_{position}_{axis}"
-        for finger in fingers
-        for position in EFLESH_POSITIONS
-        for axis in EFLESH_AXES
-    )
-
-
-class EFleshSensor:
-    """Stream an eFlesh magnetic tactile array through the anyskin reader.
-
-    The serial framing is deliberately not reimplemented here. ``anyskin`` runs
-    its reader in a separate process, timestamps each sample, and performs the
-    fixed-length-plus-resync framing the sensor requires, which also satisfies
-    this module's rule that acquisition stays off the control thread.
-
-    Values are absolute field dominated by a large DC offset from the cuboid's
-    own magnets, so they are reported raw and unbaselined. Baselining belongs
-    downstream: on a gripper the neighbouring array's contribution varies with
-    the finger gap, so a correct baseline has to be conditioned on gripper
-    position and cannot be computed from the sample stream alone.
+    The finger count is left unset so the source detects it from the stream.
+    The firmware sizes its frame at boot from however many boards enumerated,
+    and a host that assumes the wrong width sits in its resync loop forever
+    rather than raising, which is a hang rather than an error.
     """
 
-    def __init__(self, config: SensorConfig, process_factory: object | None = None) -> None:
+    def __init__(self, config: SensorConfig, source_factory: object | None = None) -> None:
         self._name = config.name
-        self._labels = eflesh_labels(config.num_mags, config.fingers)
         self._config = config
-        self._process = None
-        self._factory = process_factory
-        if process_factory is None:
+        self._source = None
+        self._factory = source_factory
+        if source_factory is None:
             try:
-                from anyskin import AnySkinProcess
+                from eflesh import EFleshSource
             except ImportError as error:  # pragma: no cover - host dependency
                 raise SensorError(
-                    "The anyskin package is missing. Install with `pip install -e '.[tactile]'`."
+                    "The eflesh package is missing. Install with `pip install -e '.[tactile]'`."
                 ) from error
-            self._factory = AnySkinProcess
+            self._factory = EFleshSource
 
     @property
     def name(self) -> str:
@@ -142,61 +107,103 @@ class EFleshSensor:
 
     @property
     def labels(self) -> tuple[str, ...]:
-        """Return one ``finger_position_axis`` label per streamed value."""
-        return self._labels
+        """Return one label per channel, empty until the finger count is known."""
+        if self._source is None or self._source.num_fingers is None:
+            return ()
+        return tuple(self._source.labels)
+
+    @property
+    def num_fingers(self) -> int | None:
+        """Return the detected finger count, or None before starting."""
+        return None if self._source is None else self._source.num_fingers
 
     def start(self) -> None:
-        """Open the serial stream and begin background acquisition."""
+        """Open the stream, detect the finger count, and capture a baseline."""
         assert self._factory is not None
-        # temp_filtered drops the per-magnetometer temperature channel, leaving
-        # three field axes each, which is what the labels above describe.
-        self._process = self._factory(
-            num_mags=self._config.num_mags,
-            # Resolved here rather than at configuration load, so a config
-            # stays valid while the hardware is detached.
+        self._source = self._factory(
+            # Resolved here rather than at configuration load, so a config stays
+            # valid while the hardware is detached.
             port=resolve_serial_port(self._config.port),
-            temp_filtered=True,
+            settle=self._config.settle,
+            name=self._name,
         )
-        self._process.start()
-        self._process.start_streaming()
+        self._source.start()
 
     def read_latest(self) -> SensorReading | None:
-        """Return the newest sample, or None before the stream produces one."""
-        if self._process is None:
+        """Return the newest baselined sample as a flat labelled vector."""
+        if self._source is None:
             return None
-        reading = self._process.last_reading
-        if reading is None or len(reading) < 2:
-            return None
-        source_timestamp = float(reading[0])
-        values = tuple(float(value) for value in reading[1:])
-        if len(values) != len(self._labels):
-            raise SensorError(
-                f"{self._name} reported {len(values)} values but "
-                f"{len(self._labels)} labels are configured"
-            )
-        if any(abs(value) > EFLESH_INVALID_MICROTESLA for value in values):
-            # Firmware normally holds the last good sample, so this is a
-            # belt-and-braces check rather than an expected path.
-            _LOGGER.warning("%s reported an out-of-range magnetometer value", self._name)
+        reading = self._source.read_latest()
+        if reading is None:
             return None
         return SensorReading(
             name=self._name,
             timestamp=time.monotonic(),
-            source_timestamp=source_timestamp,
-            labels=self._labels,
-            values=values,
+            source_timestamp=float(reading.timestamp),
+            labels=self.labels,
+            values=tuple(float(value) for value in np.asarray(reading.values).ravel()),
         )
 
     def close(self) -> None:
-        """Stop streaming and join the reader process."""
-        process, self._process = self._process, None
-        if process is None:
-            return
-        process.pause_streaming()
-        process.join()
+        """Stop streaming and release the transport."""
+        source, self._source = self._source, None
+        if source is not None:
+            source.close()
+
+    def geometry_payload(self) -> dict:
+        """Return the static pad description to send once per client.
+
+        Raises:
+            SensorError: If the sensor has not started, so the finger count and
+                therefore the geometry are still unknown.
+        """
+        from eflesh.web import geometry_payload
+
+        if self._source is None or self._source.num_fingers is None:
+            raise SensorError(f"Sensor '{self._name}' has not started; geometry is unknown")
+        return geometry_payload(self._source.num_fingers)
+
+    def display_payloads(self, hz: float = 60.0, stop: object | None = None) -> object:
+        """Yield display frames at a bounded rate, dropping stale samples.
+
+        The sensor streams far faster than a browser can paint, so the full rate
+        belongs in the backend for recording while the display is throttled.
+
+        Raises:
+            SensorError: If the sensor has not started.
+        """
+        from eflesh.web import iter_payloads
+
+        if self._source is None:
+            raise SensorError(f"Sensor '{self._name}' has not started")
+        return iter_payloads(self._source, hz=hz, stop=stop)
+
+    def rebaseline(self) -> None:
+        """Re-zero every channel. The sensor must be untouched and settled."""
+        if self._source is None:
+            raise SensorError(f"Sensor '{self._name}' has not started")
+        self._source.rebaseline()
+
+    def set_gap_baseline(self, samples: object) -> None:
+        """Replace the baseline with one conditioned on the gripper gap.
+
+        Hook only, not yet wired to anything. Two cuboids on opposing fingers
+        see and physically repel each other as a function of the finger gap, so
+        a single static baseline drifts into phantom contact as the gripper
+        closes. Correcting it needs a sweep logged against the gripper encoder;
+        call this with the interpolated vector as the gap changes.
+
+        Raises:
+            SensorError: If the sensor has not started.
+        """
+        if self._source is None:
+            raise SensorError(f"Sensor '{self._name}' has not started")
+        # The package exposes the setter on the processor rather than the
+        # source, so this reaches one level in by design.
+        self._source._proc.set_baseline(samples)
 
 
-_SENSOR_DRIVERS: dict[str, type] = {"eflesh": EFleshSensor}
+_SENSOR_DRIVERS: dict[str, type] = {"eflesh": EFleshTactileSensor}
 
 
 def build_sensor(config: SensorConfig) -> SensorSource:
