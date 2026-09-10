@@ -34,6 +34,10 @@ tactile = [
     "anyskin>=1,<2",
 ]
 dev = [
+    # starlette.testclient needs httpx, which the WebSocket tests use. It is
+    # present locally only as a transitive dependency, so CI installs nothing
+    # without this and the socket tests fail there alone.
+    "httpx>=0.27,<1",
     "pytest>=8,<9",
     "ruff>=0.12,<1",
 ]
