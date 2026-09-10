@@ -1,3 +1,4 @@
+import time
 import unittest
 
 from eflesh import FakeEFleshSource
@@ -119,10 +120,20 @@ class EFleshDriverTests(unittest.TestCase):
             sensor.start()
         self.assertIn("NOTATTACHED", str(raised.exception))
 
+    def await_sample(self, sensor, timeout=2.0):
+        """Wait for the reader thread to publish its first sample."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            reading = sensor.read_latest()
+            if reading is not None:
+                return reading
+            time.sleep(0.005)
+        raise AssertionError("the reader published no sample")
+
     def test_a_reading_is_flattened_with_one_label_per_value(self):
         sensor, _record = self.make()
         sensor.start()
-        reading = sensor.read_latest()
+        reading = self.await_sample(sensor)
 
         self.assertEqual(reading.name, "gripper_tactile")
         self.assertEqual(len(reading.values), 30)
@@ -263,6 +274,85 @@ class SensorHubTests(unittest.TestCase):
 
         self.assertEqual(set(readings), {"gripper_tactile"})
         self.assertEqual(len(readings["gripper_tactile"].values), 30)
+
+
+class FullRateReaderTests(unittest.TestCase):
+    """The sensor is read once per sample by one thread, not once per consumer."""
+
+    def make(self):
+        sensor = EFleshTactileSensor(eflesh_config(), source_factory=fake_factory())
+        sensor.start()
+        return sensor
+
+    def test_derived_signals_do_not_depend_on_how_often_a_consumer_reads(self):
+        # Previously both the display and the metrics path advanced the source's
+        # own vibration history, so that signal changed meaning depending on
+        # whether a browser was attached.
+        observed = []
+        for poll_hz in (60.0, 4.0):
+            sensor = self.make()
+            time.sleep(0.35)
+            for _ in range(3):
+                sensor.read_latest()
+                time.sleep(1.0 / poll_hz)
+            reading, _monotonic = sensor._store.latest()
+            observed.append(reading.signals.fingers[0].vibration)
+            sensor.close()
+
+        fast, slow = observed
+        self.assertLess(abs(fast - slow), max(fast, slow) * 0.5 + 0.5)
+
+    def test_every_sample_is_buffered_for_a_recorder(self):
+        sensor = self.make()
+        time.sleep(0.3)
+        drained = sensor.drain()
+        sensor.close()
+
+        # Far more than a per-second snapshot: the reader runs at sensor rate.
+        self.assertGreater(len(drained), 20)
+        timestamp, reading = drained[0]
+        self.assertIsInstance(timestamp, float)
+        self.assertEqual(len(reading.signals.fingers), 2)
+
+    def test_draining_twice_does_not_repeat_samples(self):
+        sensor = self.make()
+        time.sleep(0.2)
+        first = sensor.drain()
+        second = sensor.drain()
+        sensor.close()
+
+        self.assertGreater(len(first), 0)
+        self.assertLess(len(second), len(first))
+
+    def test_the_observed_rate_is_reported(self):
+        sensor = self.make()
+        time.sleep(0.3)
+        rate = sensor.sample_rate_hz
+        sensor.close()
+        self.assertGreater(rate, 20.0)
+
+    def test_sample_age_distinguishes_live_from_frozen(self):
+        sensor = self.make()
+        time.sleep(0.2)
+        self.assertLess(sensor.age_seconds(), 0.5)
+        sensor.close()
+        # Once the reader stops, the newest sample simply ages.
+        frozen = sensor.age_seconds()
+        time.sleep(0.15)
+        self.assertGreater(sensor.age_seconds(), frozen)
+
+    def test_age_is_unknown_before_any_sample(self):
+        sensor = EFleshTactileSensor(eflesh_config(), source_factory=fake_factory())
+        self.assertIsNone(sensor.age_seconds())
+
+    def test_reading_the_snapshot_does_not_consume_the_recorder_buffer(self):
+        sensor = self.make()
+        time.sleep(0.25)
+        for _ in range(5):
+            sensor.read_latest()
+        drained = sensor.drain()
+        sensor.close()
+        self.assertGreater(len(drained), 20)
 
 
 if __name__ == "__main__":

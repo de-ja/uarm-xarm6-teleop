@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -24,6 +25,11 @@ from .serial_ports import resolve_serial_port
 
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# Slowest cadence the reader will spin at when a source does not block. Real
+# hardware paces itself on serial well below this.
+MIN_SAMPLE_PERIOD_SECONDS = 1.0 / 250.0
 
 
 class SensorError(RuntimeError):
@@ -71,17 +77,86 @@ class SensorSource(Protocol):
         """Release the transport and stop acquiring."""
 
 
-class _SerialisedReads:
-    """Expose one source's read_latest under a shared lock."""
+class _SampleStore:
+    """Hold the newest sample from one full-rate reader thread.
 
-    def __init__(self, source: object, lock: threading.Lock) -> None:
-        self._source = source
-        self._lock = lock
+    A single reader means the sensor's own signal derivation advances exactly
+    once per hardware sample. When two consumers polled the source directly they
+    both advanced its per-finger vibration history, so that signal's meaning
+    depended on how often it happened to be read: measured 3.14 with a display
+    attached against 53.03 without, for identical motion.
+    """
+
+    def __init__(self, capacity: int = 4096) -> None:
+        self._condition = threading.Condition()
+        self._latest: object | None = None
+        self._sequence = 0
+        self._monotonic = 0.0
+        self._pending: deque = deque(maxlen=capacity)
+        self._first = 0.0
+        self._count = 0
+
+    def publish(self, reading: object) -> None:
+        """Record one sample and wake everything waiting for a new one."""
+        now = time.monotonic()
+        with self._condition:
+            self._latest = reading
+            self._monotonic = now
+            self._sequence += 1
+            self._pending.append((now, reading))
+            if self._count == 0:
+                self._first = now
+            self._count += 1
+            self._condition.notify_all()
+
+    def latest(self) -> tuple[object | None, float]:
+        """Return the newest sample and the monotonic time it arrived."""
+        with self._condition:
+            return self._latest, self._monotonic
+
+    def next_after(self, sequence: int, timeout: float = 1.0) -> tuple[object | None, int]:
+        """Block until a sample newer than ``sequence`` arrives, or time out."""
+        with self._condition:
+            if self._sequence <= sequence:
+                self._condition.wait(timeout)
+            return self._latest, self._sequence
+
+    def drain(self) -> list[tuple[float, object]]:
+        """Take every sample buffered since the last call.
+
+        The buffer is bounded, so a consumer that stops draining loses the
+        oldest samples rather than growing without limit. Intended for a
+        recorder that wants the full rate rather than a periodic snapshot.
+        """
+        with self._condition:
+            taken = list(self._pending)
+            self._pending.clear()
+        return taken
+
+    def observed_rate_hz(self) -> float:
+        """Return the mean sample rate since the first sample, or zero."""
+        with self._condition:
+            elapsed = self._monotonic - self._first
+            return float(self._count / elapsed) if elapsed > 0 else 0.0
+
+
+class _NextSample:
+    """Expose a store as a blocking source for the display throttle.
+
+    ``iter_payloads`` throttles by discarding samples until the next display
+    deadline, which only paces correctly against a source that blocks. Handing
+    it the store rather than a cached value keeps that contract, and means the
+    display costs no reads of its own.
+    """
+
+    def __init__(self, store: _SampleStore) -> None:
+        self._store = store
+        self._sequence = 0
 
     def read_latest(self) -> object:
-        """Return the source's newest reading, serialised against other readers."""
-        with self._lock:
-            return self._source.read_latest()
+        """Block until the reader publishes a sample newer than the last seen."""
+        reading, self._sequence = self._store.next_after(self._sequence)
+        return reading
 
 
 class EFleshTactileSensor:
@@ -104,10 +179,9 @@ class EFleshTactileSensor:
         self._name = config.name
         self._config = config
         self._source = None
-        # The control loop samples this at metrics rate while the display
-        # streams it far faster. Both paths advance the same per-finger
-        # vibration history, so reads are serialised.
-        self._lock = threading.Lock()
+        self._store = _SampleStore()
+        self._reader: threading.Thread | None = None
+        self._stop = threading.Event()
         self._factory = source_factory
         if source_factory is None:
             try:
@@ -146,13 +220,54 @@ class EFleshTactileSensor:
             name=self._name,
         )
         self._source.start()
+        self._stop.clear()
+        self._reader = threading.Thread(
+            target=self._read_forever, name=f"sensor-{self._name}", daemon=True
+        )
+        self._reader.start()
+
+    def _read_forever(self) -> None:
+        """Drain the sensor at its own rate, publishing every sample."""
+        assert self._source is not None
+        while not self._stop.is_set():
+            started = time.monotonic()
+            try:
+                reading = self._source.read_latest()
+            except Exception as error:  # noqa: BLE001 - a sensor cannot fault the robot
+                _LOGGER.warning("Sensor %s stopped reading: %s", self._name, error)
+                return
+            if reading is not None:
+                self._store.publish(reading)
+            # Real hardware paces this by blocking on serial. A source that
+            # returns instantly, such as the hardware-free fake, would otherwise
+            # spin a core, so an idle read is slowed to the cap.
+            remaining = MIN_SAMPLE_PERIOD_SECONDS - (time.monotonic() - started)
+            if remaining > 0:
+                self._stop.wait(remaining)
+
+    @property
+    def sample_rate_hz(self) -> float:
+        """Return the mean rate at which samples have actually arrived."""
+        return self._store.observed_rate_hz()
+
+    def age_seconds(self) -> float | None:
+        """Return how long ago the newest sample arrived, or None if none has."""
+        _reading, monotonic = self._store.latest()
+        return None if monotonic == 0.0 else time.monotonic() - monotonic
+
+    def drain(self) -> list:
+        """Take every sample buffered since the last call, for a recorder."""
+        return self._store.drain()
 
     def read_latest(self) -> SensorReading | None:
-        """Return the newest baselined sample as a flat labelled vector."""
+        """Return the newest sample as a flat labelled vector.
+
+        Reads the reader thread's snapshot rather than the sensor, so sampling
+        the sensor for telemetry cannot change what any other consumer sees.
+        """
         if self._source is None:
             return None
-        with self._lock:
-            reading = self._source.read_latest()
+        reading, _monotonic = self._store.latest()
         if reading is None:
             return None
         return SensorReading(
@@ -164,7 +279,11 @@ class EFleshTactileSensor:
         )
 
     def close(self) -> None:
-        """Stop streaming and release the transport."""
+        """Stop the reader and release the transport."""
+        self._stop.set()
+        reader, self._reader = self._reader, None
+        if reader is not None and reader is not threading.current_thread():
+            reader.join(timeout=2.0)
         source, self._source = self._source, None
         if source is not None:
             source.close()
@@ -195,9 +314,9 @@ class EFleshTactileSensor:
 
         if self._source is None:
             raise SensorError(f"Sensor '{self._name}' has not started")
-        # iter_payloads only needs read_latest, so a proxy is enough to bring
-        # the display path under the same lock as the recording path.
-        return iter_payloads(_SerialisedReads(self._source, self._lock), hz=hz, stop=stop)
+        # Fed from the reader's store rather than the sensor, so the display
+        # costs no reads of its own and cannot perturb the recorded signals.
+        return iter_payloads(_NextSample(self._store), hz=hz, stop=stop)
 
     def rebaseline(self) -> None:
         """Re-zero every channel. The sensor must be untouched and settled."""

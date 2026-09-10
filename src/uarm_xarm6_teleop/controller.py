@@ -263,12 +263,23 @@ class TeleopController:
         # that robot commands contend for. Reads are non-blocking snapshots of
         # a background acquirer, and the hub absorbs any failure.
         for reading in self._sensors.read_all().values():
-            payload[f"sensor.{reading.name}"] = {
+            source = self._sensors.source(reading.name)
+            entry: dict[str, object] = {
                 "timestamp": reading.timestamp,
                 "source_timestamp": reading.source_timestamp,
                 "labels": list(reading.labels),
                 "values": list(reading.values),
             }
+            # A sensor that has stopped delivering still returns its last
+            # sample, which reads as a valid measurement. The observed rate and
+            # the age of that sample are what distinguish live from frozen.
+            rate = getattr(source, "sample_rate_hz", None)
+            if rate is not None:
+                entry["sample_rate_hz"] = float(rate)
+            age = getattr(source, "age_seconds", None)
+            if callable(age):
+                entry["age_seconds"] = age()
+            payload[f"sensor.{reading.name}"] = entry
         if self._sensors.failed:
             payload["sensors_failed"] = list(self._sensors.failed)
         if latency is not None:
