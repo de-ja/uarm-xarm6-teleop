@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { TactileView } from "./TactileView";
+import { useTactile } from "./tactile";
 import {
   Activity,
   AlertTriangle,
@@ -227,6 +229,7 @@ function PhysicalStartDialog({
 
 export function App() {
   const { snapshot, setSnapshot, connection, connectionError } = useTelemetry();
+  const tactile = useTactile(60);
   const [robotIp, setRobotIp] = useState("");
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -482,6 +485,13 @@ export function App() {
                 ))}
               </div>
             )}
+          </section>
+
+          <section className="panel tactile-panel">
+            <div className="section-title">
+              <div><p className="eyebrow">Live touch</p><h2>Gripper tactile</h2></div>
+            </div>
+            <TactileView state={tactile} />
           </section>
 
           <section className="panel pose-panel">

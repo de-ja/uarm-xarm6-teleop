@@ -12,6 +12,7 @@ the control thread so that a slow or wedged transport cannot stall it.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass
 
@@ -70,6 +71,19 @@ class SensorSource(Protocol):
         """Release the transport and stop acquiring."""
 
 
+class _SerialisedReads:
+    """Expose one source's read_latest under a shared lock."""
+
+    def __init__(self, source: object, lock: threading.Lock) -> None:
+        self._source = source
+        self._lock = lock
+
+    def read_latest(self) -> object:
+        """Return the source's newest reading, serialised against other readers."""
+        with self._lock:
+            return self._source.read_latest()
+
+
 class EFleshTactileSensor:
     """Adapt the eflesh package's source to the auxiliary sensor interface.
 
@@ -90,6 +104,10 @@ class EFleshTactileSensor:
         self._name = config.name
         self._config = config
         self._source = None
+        # The control loop samples this at metrics rate while the display
+        # streams it far faster. Both paths advance the same per-finger
+        # vibration history, so reads are serialised.
+        self._lock = threading.Lock()
         self._factory = source_factory
         if source_factory is None:
             try:
@@ -133,7 +151,8 @@ class EFleshTactileSensor:
         """Return the newest baselined sample as a flat labelled vector."""
         if self._source is None:
             return None
-        reading = self._source.read_latest()
+        with self._lock:
+            reading = self._source.read_latest()
         if reading is None:
             return None
         return SensorReading(
@@ -176,7 +195,9 @@ class EFleshTactileSensor:
 
         if self._source is None:
             raise SensorError(f"Sensor '{self._name}' has not started")
-        return iter_payloads(self._source, hz=hz, stop=stop)
+        # iter_payloads only needs read_latest, so a proxy is enough to bring
+        # the display path under the same lock as the recording path.
+        return iter_payloads(_SerialisedReads(self._source, self._lock), hz=hz, stop=stop)
 
     def rebaseline(self) -> None:
         """Re-zero every channel. The sensor must be untouched and settled."""
@@ -248,6 +269,22 @@ class SensorHub:
     def failed(self) -> tuple[str, ...]:
         """Return the identifiers of sensors dropped after an error."""
         return tuple(sorted(self._failed))
+
+    def source(self, name: str) -> SensorSource | None:
+        """Return the live sensor with this name, or None if absent or failed.
+
+        Args:
+            name: Configured sensor identifier.
+
+        Returns:
+            The source, or None when it does not exist or has been dropped.
+        """
+        if name in self._failed:
+            return None
+        for source in self._sources:
+            if source.name == name:
+                return source
+        return None
 
     def _drop(self, source: SensorSource, action: str, error: Exception) -> None:
         self._failed.add(source.name)

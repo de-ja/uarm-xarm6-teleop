@@ -218,6 +218,24 @@ class TeleopController:
             except Exception:  # noqa: BLE001,S110 - logging cannot affect robot safety
                 pass
 
+    def tactile_sensor(self, name: str | None = None) -> object | None:
+        """Return a started tactile sensor that can render a display view.
+
+        Args:
+            name: Configured sensor name, or None to take the only one.
+
+        Returns:
+            The sensor, or None when no matching started sensor exists.
+        """
+        candidates = [
+            source
+            for source in (self._sensors.source(each) for each in self._sensors.names)
+            if source is not None and hasattr(source, "geometry_payload")
+        ]
+        if name is not None:
+            return next((source for source in candidates if source.name == name), None)
+        return candidates[0] if len(candidates) == 1 else None
+
     def _emit_metrics(self, mode: TeleopMode, timeouts: int) -> None:
         """Send one periodic measurement sample to the structured log.
 

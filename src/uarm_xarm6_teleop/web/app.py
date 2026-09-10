@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
 import time
@@ -261,6 +262,86 @@ def create_app(
     @app.post("/api/fault/reset", response_model=TeleopSnapshot)
     def reset_fault() -> dict[str, object]:
         return _invoke(active_controller.reset_fault)
+
+    @app.websocket("/ws/tactile")
+    async def tactile(
+        websocket: WebSocket,
+        name: str | None = Query(default=None),
+        frequency: float = Query(default=60.0, ge=1.0, le=120.0),
+    ) -> None:
+        """Stream tactile display frames, geometry first.
+
+        The geometry carries chip positions, pad size and the contact threshold,
+        all verified by hand on hardware, so the frontend draws from it rather
+        than holding a second copy that would drift.
+        """
+        await websocket.accept()
+        sensor = active_controller.tactile_sensor(name)
+        if sensor is None:
+            await websocket.send_json(
+                {"type": "unavailable", "reason": "No started tactile sensor is configured"}
+            )
+            await websocket.close()
+            return
+        try:
+            geometry = sensor.geometry_payload()
+        except Exception as error:  # noqa: BLE001 - a sensor cannot fault the console
+            await websocket.send_json({"type": "unavailable", "reason": str(error)})
+            await websocket.close()
+            return
+        await websocket.send_json({"type": "geometry", **geometry})
+
+        loop = asyncio.get_running_loop()
+        # Depth one: a client that falls behind should see the newest frame, not
+        # a backlog of stale ones.
+        frames: asyncio.Queue = asyncio.Queue(maxsize=1)
+        stop_pump = threading.Event()
+
+        def offer(frame: dict) -> None:
+            if frames.full():
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    frames.get_nowait()
+            frames.put_nowait(frame)
+
+        def pump() -> None:
+            # The sensor generator blocks on serial and is throttled by busy
+            # waiting, so it must never run on the event loop.
+            try:
+                for frame in sensor.display_payloads(hz=frequency, stop=stop_pump.is_set):
+                    loop.call_soon_threadsafe(offer, frame)
+            except Exception:  # noqa: BLE001,S110 - the socket closes on its own
+                pass
+
+        worker = threading.Thread(target=pump, name="tactile-display", daemon=True)
+        worker.start()
+
+        async def send_frames() -> None:
+            while True:
+                frame = await frames.get()
+                await websocket.send_json({"type": "frame", **frame})
+
+        async def wait_for_disconnect() -> None:
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    return
+
+        sender = asyncio.create_task(send_frames())
+        receiver = asyncio.create_task(wait_for_disconnect())
+        try:
+            completed, _pending = await asyncio.wait(
+                {sender, receiver}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in completed:
+                await task
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        finally:
+            stop_pump.set()
+            sender.cancel()
+            receiver.cancel()
+            await asyncio.gather(sender, receiver, return_exceptions=True)
+            await asyncio.to_thread(worker.join, 2.0)
 
     @app.websocket("/ws/telemetry")
     async def telemetry(
