@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from .config import SensorConfig
+from .serial_ports import resolve_serial_port
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -151,7 +152,9 @@ class EFleshSensor:
         # three field axes each, which is what the labels above describe.
         self._process = self._factory(
             num_mags=self._config.num_mags,
-            port=self._config.port,
+            # Resolved here rather than at configuration load, so a config
+            # stays valid while the hardware is detached.
+            port=resolve_serial_port(self._config.port),
             temp_filtered=True,
         )
         self._process.start()
