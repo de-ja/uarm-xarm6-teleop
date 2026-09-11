@@ -26,8 +26,13 @@ mapping, validation, the physical command loop, and the xArm watchdog.
 
 Project documentation:
 
+- [`CLAUDE.md`](CLAUDE.md): orientation, invariants, and the environment
+  details that otherwise cost an hour to rediscover.
 - [`docs/architecture.md`](docs/architecture.md): component ownership, state
   machine, concurrency, safety invariants, and improvement roadmap.
+- [`docs/sensors.md`](docs/sensors.md): auxiliary sensors, why their failure
+  policy is the opposite of the leader's, USB device selection, and the eFlesh
+  tactile driver.
 - [`docs/architecture-tasks.md`](docs/architecture-tasks.md): implementation
   status and acceptance criteria for future architecture work.
 - [`docs/wireless-teleop.md`](docs/wireless-teleop.md): complete private-router
@@ -424,6 +429,40 @@ watchdog timeout, joint bounds, and gripper limits for the configured
 `gripper_kind`. Keep
 `robot_ip` blank in committed configuration; pass it at runtime or put it in a
 private override TOML.
+
+## Sensors and device selection
+
+Auxiliary sensors are **observations, never control inputs**. A sensor that
+fails is reported and dropped while teleoperation continues, which is the
+opposite of the leader's fail-closed policy and is deliberate.
+
+Identify USB devices by what they are rather than by where they landed. The
+U-ARM and any USB CDC sensor compete for the same `/dev/ttyACM*` numbering, and
+that numbering depends on boot order:
+
+```bash
+uarm-ports    # attached devices with a ready-to-paste selector for each,
+              # then how every configured device currently resolves
+```
+
+```toml
+[serial]
+device = "usb:serial=LEADER123"
+
+[[sensors]]
+kind = "eflesh"                  # "eflesh_fake" needs no hardware
+name = "gripper_tactile"
+port = "usb:serial=XXXXXXXXXXXX"
+settle = 5.0                     # rest before the baseline; never zero
+```
+
+An ambiguous selector is an error rather than a guess, because attaching to the
+wrong device would mean reading a tactile sensor as servo positions.
+
+`GET /api/sensors` lists what is configured and the console offers each for
+display, the same way cameras are listed and selected. See
+[`docs/sensors.md`](docs/sensors.md) for the driver interface, the eFlesh
+specifics, and the known limits.
 
 ## Web operator console
 

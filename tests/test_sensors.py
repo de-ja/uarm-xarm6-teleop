@@ -285,8 +285,16 @@ class SensorHubTests(unittest.TestCase):
         sensor = EFleshTactileSensor(eflesh_config(), source_factory=fake_factory())
         hub = SensorHub((sensor,))
         hub.start()
-        readings = hub.read_all()
-        hub.close()
+        try:
+            # Reads are snapshots of a background reader, so the hub reports
+            # nothing until that reader has published its first sample.
+            deadline = time.monotonic() + 2.0
+            readings = hub.read_all()
+            while not readings and time.monotonic() < deadline:
+                time.sleep(0.005)
+                readings = hub.read_all()
+        finally:
+            hub.close()
 
         self.assertEqual(set(readings), {"gripper_tactile"})
         self.assertEqual(len(readings["gripper_tactile"].values), 30)
