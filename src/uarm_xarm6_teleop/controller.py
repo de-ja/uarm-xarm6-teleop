@@ -189,6 +189,12 @@ class TeleopController:
         # every later call report failures instead of raising, so an unplugged
         # or wedged accessory can never fault a teleoperation run.
         self._sensors: SensorHub = sensor_hub_factory(config.sensors)
+        # Sensors are observations, independent of any run, and starting one can
+        # block for seconds while its baseline settles. Bring them up off-thread
+        # at construction so they are available while the operator is still
+        # setting up rather than only once teleoperation is running.
+        if self._sensors.names:
+            threading.Thread(target=self._sensors.start, name="sensor-startup", daemon=True).start()
         self._sample: LeaderSample | None = None
         self._action: np.ndarray | None = None
         self._robot_status: XArmStatus | None = None
@@ -218,6 +224,30 @@ class TeleopController:
             except Exception:  # noqa: BLE001,S110 - logging cannot affect robot safety
                 pass
 
+    def sensors(self) -> tuple:
+        """Describe every configured sensor for browser selection."""
+        return self._sensors.describe(self.config.sensors)
+
+    def tactile_sensor(self, name: str | None = None) -> object | None:
+        """Return a started tactile sensor that can render a display view.
+
+        Args:
+            name: Configured sensor name, or None to take the only one.
+
+        Returns:
+            The sensor, or None when no matching started sensor exists.
+        """
+        candidates = [
+            source
+            for source in (self._sensors.source(each) for each in self._sensors.names)
+            if source is not None and getattr(source, "view", None) == "tactile"
+        ]
+        if name is not None:
+            return next((source for source in candidates if source.name == name), None)
+        # Without a name, take the first in configuration order. Refusing to
+        # choose would mean a second sensor silently blanked the panel.
+        return candidates[0] if candidates else None
+
     def _emit_metrics(self, mode: TeleopMode, timeouts: int) -> None:
         """Send one periodic measurement sample to the structured log.
 
@@ -245,12 +275,23 @@ class TeleopController:
         # that robot commands contend for. Reads are non-blocking snapshots of
         # a background acquirer, and the hub absorbs any failure.
         for reading in self._sensors.read_all().values():
-            payload[f"sensor.{reading.name}"] = {
+            source = self._sensors.source(reading.name)
+            entry: dict[str, object] = {
                 "timestamp": reading.timestamp,
                 "source_timestamp": reading.source_timestamp,
                 "labels": list(reading.labels),
                 "values": list(reading.values),
             }
+            # A sensor that has stopped delivering still returns its last
+            # sample, which reads as a valid measurement. The observed rate and
+            # the age of that sample are what distinguish live from frozen.
+            rate = getattr(source, "sample_rate_hz", None)
+            if rate is not None:
+                entry["sample_rate_hz"] = float(rate)
+            age = getattr(source, "age_seconds", None)
+            if callable(age):
+                entry["age_seconds"] = age()
+            payload[f"sensor.{reading.name}"] = entry
         if self._sensors.failed:
             payload["sensors_failed"] = list(self._sensors.failed)
         if latency is not None:

@@ -25,6 +25,7 @@ from uarm_xarm6_teleop.web.app import (
 class StubController:
     def __init__(self):
         self.config = load_config()
+        self.tactile = None
         self.capabilities = RuntimeCapabilities(
             leader_transport="remote_browser_pairing",
             simulation_available=True,
@@ -41,6 +42,29 @@ class StubController:
 
     def set_video_clock(self, source):
         self.video_clock = source
+
+    def sensors(self):
+        return (
+            ()
+            if self.tactile is None
+            else (
+                __import__("uarm_xarm6_teleop.sensors", fromlist=["SensorInfo"]).SensorInfo(
+                    name=self.tactile.name,
+                    kind="eflesh_fake",
+                    view="tactile",
+                    started=True,
+                    sample_rate_hz=200.0,
+                    age_seconds=0.01,
+                ),
+            )
+        )
+
+    def tactile_sensor(self, name=None):
+        if self.tactile is None:
+            return None
+        if name is not None and name != self.tactile.name:
+            return None
+        return self.tactile
 
     def snapshot(self):
         return TeleopSnapshot(
@@ -112,6 +136,7 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("/api/leader/connect", paths)
         self.assertIn("/api/teleop/start", paths)
         self.assertIn("/ws/telemetry", paths)
+        self.assertIn("/ws/tactile", paths)
         self.assertIn("", paths)  # StaticFiles mount at the application root.
         frontend = Path(__file__).parents[1] / "src/uarm_xarm6_teleop/web/dist/index.html"
         self.assertIn("U-ARM Operator", frontend.read_text())
@@ -306,6 +331,93 @@ class WebApiTests(unittest.TestCase):
 
         asyncio.run(scenario())
         self.assertEqual(self.controller.stop_calls, 1)
+
+
+class TactileSocketTests(unittest.TestCase):
+    def setUp(self):
+        self.controller = StubController()
+        self.app = create_app(self.controller)
+
+    def attach_sensor(self, num_fingers=2):
+        from uarm_xarm6_teleop.config import SensorConfig
+        from uarm_xarm6_teleop.sensors import EFleshTactileSensor
+
+        def factory(port, settle, name):
+            from eflesh import FakeEFleshSource
+
+            return FakeEFleshSource(num_fingers=num_fingers, name=name)
+
+        sensor = EFleshTactileSensor(
+            SensorConfig(kind="eflesh", name="gripper_tactile", port="/dev/null", settle=5.0),
+            source_factory=factory,
+        )
+        sensor.start()
+        self.controller.tactile = sensor
+        return sensor
+
+    def test_without_a_sensor_the_socket_reports_unavailable(self):
+        from fastapi.testclient import TestClient
+
+        with TestClient(self.app) as client, client.websocket_connect("/ws/tactile") as ws:
+            message = ws.receive_json()
+        self.assertEqual(message["type"], "unavailable")
+
+    def test_geometry_is_sent_once_before_any_frame(self):
+        from fastapi.testclient import TestClient
+
+        self.attach_sensor()
+        with TestClient(self.app) as client:
+            with client.websocket_connect("/ws/tactile?frequency=120") as ws:
+                first = ws.receive_json()
+                second = ws.receive_json()
+
+        # The frontend draws the pad from these rather than from a second copy
+        # of constants that were verified by hand on hardware.
+        self.assertEqual(first["type"], "geometry")
+        self.assertEqual(first["num_fingers"], 2)
+        self.assertEqual(len(first["chip_positions_mm"]), 5)
+        self.assertIn("contact_threshold_ut", first)
+        self.assertEqual(second["type"], "frame")
+
+    def test_frames_carry_per_finger_signals_in_the_pad_frame(self):
+        from fastapi.testclient import TestClient
+
+        self.attach_sensor()
+        with TestClient(self.app) as client:
+            with client.websocket_connect("/ws/tactile?frequency=120") as ws:
+                ws.receive_json()
+                frame = ws.receive_json()
+
+        self.assertEqual(len(frame["fingers"]), 2)
+        finger = frame["fingers"][0]
+        for key in ("force", "normal", "shear", "vibration", "per_chip", "dbz", "shear_xy"):
+            self.assertIn(key, finger)
+        self.assertEqual(len(finger["shear_xy"]), 5)
+        self.assertIn("grip_force", frame)
+        self.assertIn("balance", frame)
+
+    def test_a_single_finger_rig_reports_no_balance(self):
+        from fastapi.testclient import TestClient
+
+        self.attach_sensor(num_fingers=1)
+        with TestClient(self.app) as client:
+            with client.websocket_connect("/ws/tactile?frequency=120") as ws:
+                geometry = ws.receive_json()
+                frame = ws.receive_json()
+
+        # Balance only exists across a pair, so the frontend must tolerate null.
+        self.assertEqual(geometry["num_fingers"], 1)
+        self.assertEqual(len(frame["fingers"]), 1)
+        self.assertIsNone(frame["balance"])
+
+    def test_an_unknown_sensor_name_is_unavailable(self):
+        from fastapi.testclient import TestClient
+
+        self.attach_sensor()
+        with TestClient(self.app) as client:
+            with client.websocket_connect("/ws/tactile?name=nosuch") as ws:
+                message = ws.receive_json()
+        self.assertEqual(message["type"], "unavailable")
 
 
 if __name__ == "__main__":

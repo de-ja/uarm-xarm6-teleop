@@ -42,6 +42,19 @@ So `frame_length = 16 * num_mags + 2`.
 | one board, direct | 5 | 82 B | ~400 Hz |
 | two boards via I2C mux | 10 | 162 B | ~194 Hz |
 
+### Frame width is decided by the firmware at boot
+
+The mux firmware sizes its frame from however many boards it found when it
+started. Two boards give 162 bytes; if one fails to enumerate you silently get
+82 instead. A host hardcoded to the larger size then never sees a valid frame
+and **sits in its resync loop forever rather than raising** -- a hang, not an
+error.
+
+Detect the width instead of assuming it: sync to a `\r\n`, measure the next
+handful of `read_until` lengths, take the mode, and derive
+`num_mags = (width - 2) // 16`. Reject a width where `(width - 2) % 16 != 0`.
+`visualizer/viz_gripper.py:detect_num_mags()` is a working ~20-line version.
+
 ### Framing and resync -- do not use readline()
 
 The `\r\n` terminator is **not** a safe delimiter on its own: the float payload

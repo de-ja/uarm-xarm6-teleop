@@ -1,4 +1,4 @@
-import type { CameraInfo, TeleopSnapshot } from "./types";
+import type { CameraInfo, SensorInfo, TeleopSnapshot } from "./types";
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -29,6 +29,12 @@ export async function getCameras(): Promise<CameraInfo[]> {
   const response = await fetch("/api/cameras");
   if (!response.ok) throw new ApiError("Could not load camera sources", response.status);
   return response.json() as Promise<CameraInfo[]>;
+}
+
+export async function getSensors(): Promise<SensorInfo[]> {
+  const response = await fetch("/api/sensors");
+  if (!response.ok) throw new ApiError("Could not load sensors", response.status);
+  return response.json() as Promise<SensorInfo[]>;
 }
 
 export async function reportCameraLatency(cameraId: string, latencyMs: number): Promise<void> {

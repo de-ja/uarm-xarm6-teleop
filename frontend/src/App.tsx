@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { TactileView } from "./TactileView";
+import { useTactile } from "./tactile";
 import {
   Activity,
   AlertTriangle,
@@ -22,11 +24,12 @@ import {
   calibrateServerClock,
   commands,
   getCameras,
+  getSensors,
   reportCameraLatency,
 } from "./api";
 import { consumeCameraStream } from "./cameraStream";
 import { getCapabilities } from "./state";
-import type { CameraInfo, ControllerEvent, TeleopSnapshot } from "./types";
+import type { CameraInfo, ControllerEvent, TeleopSnapshot, SensorInfo } from "./types";
 import { useTelemetry } from "./useTelemetry";
 
 const JOINTS = ["Base", "Shoulder", "Elbow", "Forearm", "Wrist", "Tool"];
@@ -56,6 +59,18 @@ function ago(timestamp: number) {
 
 function formatMs(value: number | null | undefined) {
   return value == null ? "—" : `${value.toFixed(1)} ms`;
+}
+
+function TactileSensorPanel({ name }: { name: string }) {
+  // A component per sensor, because a hook cannot be called in a loop and each
+  // sensor needs its own socket.
+  const state = useTactile(name, 60);
+  return (
+    <div className="tactile-sensor">
+      <p className="tactile-chart-label">{name}</p>
+      <TactileView state={state} />
+    </div>
+  );
 }
 
 function Metric({ label, value, good = true }: { label: string; value: string; good?: boolean }) {
@@ -227,6 +242,8 @@ function PhysicalStartDialog({
 
 export function App() {
   const { snapshot, setSnapshot, connection, connectionError } = useTelemetry();
+  const [sensors, setSensors] = useState<SensorInfo[]>([]);
+  const [selectedSensorNames, setSelectedSensorNames] = useState<string[]>([]);
   const [robotIp, setRobotIp] = useState("");
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -317,6 +334,28 @@ export function App() {
       </main>
     );
   }
+
+  useEffect(() => {
+    let disposed = false;
+    getSensors()
+      .then((found) => {
+        if (disposed) return;
+        setSensors(found);
+        // Show every sensor that can draw itself, rather than assuming one.
+        setSelectedSensorNames(
+          found.filter((sensor) => sensor.view !== null).map((sensor) => sensor.name),
+        );
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  const toggleSensor = (name: string) =>
+    setSelectedSensorNames((current) =>
+      current.includes(name) ? current.filter((each) => each !== name) : [...current, name],
+    );
 
   return (
     <main className="app-shell">
@@ -482,6 +521,47 @@ export function App() {
                 ))}
               </div>
             )}
+          </section>
+
+          <section className="panel tactile-panel">
+            <div className="section-title">
+              <div><p className="eyebrow">Live touch</p><h2>Sensors</h2></div>
+              <span>{selectedSensorNames.length} / {sensors.length} shown</span>
+            </div>
+
+            <div className="camera-picker" aria-label="Configured sensors">
+              {sensors.map((sensor) => (
+                <label className="camera-option" key={sensor.name}>
+                  <input
+                    type="checkbox"
+                    checked={selectedSensorNames.includes(sensor.name)}
+                    disabled={sensor.view === null}
+                    onChange={() => toggleSensor(sensor.name)}
+                  />
+                  <Activity size={16} />
+                  <span>
+                    <strong>{sensor.name}</strong>
+                    <small>
+                      {sensor.kind}
+                      {sensor.view === null ? " · no view" : ""}
+                      {sensor.started ? "" : " · not started"}
+                    </small>
+                  </span>
+                </label>
+              ))}
+              {sensors.length === 0 && (
+                <div className="camera-empty">No sensors configured</div>
+              )}
+            </div>
+
+            {sensors
+              .filter(
+                (sensor) =>
+                  sensor.view === "tactile" && selectedSensorNames.includes(sensor.name),
+              )
+              .map((sensor) => (
+                <TactileSensorPanel name={sensor.name} key={sensor.name} />
+              ))}
           </section>
 
           <section className="panel pose-panel">

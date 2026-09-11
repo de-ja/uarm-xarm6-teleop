@@ -152,3 +152,50 @@ footer { padding: 13px 28px; display: flex; justify-content: space-between; colo
   .joint-row > span { font-size: 10px; }
   footer { padding: 12px 16px; gap: 18px; }
 }
+
+/* Tactile sensing panel. Geometry comes from the sensor at runtime, so these
+   rules describe presentation only and hold no chip positions or pad sizes. */
+.tactile { display: flex; flex-direction: column; gap: 14px; }
+.tactile-fingers { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
+.tactile-finger { display: flex; flex-direction: column; gap: 6px; }
+.tactile-finger-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; }
+.tactile-flag { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
+.tactile-flag.contact { color: var(--accent); }
+.tactile-pad { width: 100%; aspect-ratio: 1; background: rgba(8, 12, 15, .6); border-radius: 10px; }
+.tactile-outline { fill: none; stroke: var(--line); stroke-width: 1.5; }
+.tactile-outline.contact { stroke: var(--accent); }
+.tactile-chip { fill: rgba(82, 213, 164, .32); stroke: var(--accent); stroke-width: 1; }
+.tactile-chip.negative { fill: none; stroke: var(--warning); }
+.tactile-shear { stroke: #8fd6ff; stroke-width: 1.6; stroke-linecap: round; }
+.tactile-centroid line { stroke: #ffd479; stroke-width: 1.4; }
+.tactile-chart { display: flex; align-items: center; gap: 8px; color: var(--accent); }
+.tactile-chart svg { flex: 1; height: 30px; }
+.tactile-chart-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .12em; min-width: 62px; }
+.tactile-pair { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--line); padding-top: 12px; }
+.tactile-grip { display: flex; align-items: baseline; gap: 8px; }
+.tactile-grip strong { font-size: 20px; }
+.tactile-balance { display: flex; align-items: center; gap: 8px; }
+.tactile-balance-track { position: relative; flex: 1; height: 10px; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+.tactile-balance-centre { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--line); }
+.tactile-balance-fill { position: absolute; top: 0; bottom: 0; background: var(--accent); }
+
+/* Ambient grip readout. No absolute full scale exists in microtesla, so the
+   bar auto-ranges to the session peak and marks the contact threshold, which
+   is the one reference that means something. */
+.grip { display: flex; flex-direction: column; gap: 8px; }
+.grip-row { display: flex; align-items: center; gap: 10px; }
+.grip-track { position: relative; flex: 1; height: 14px; border: 1px solid var(--line); border-radius: 999px; background: rgba(8, 12, 15, .6); overflow: hidden; }
+.grip-fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); transition: width 60ms linear; }
+.grip-threshold { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--warning); opacity: .9; }
+.grip-peak { position: absolute; top: 0; bottom: 0; width: 1px; background: #e9edf0; opacity: .55; }
+.grip-centre { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--line); }
+.grip-balance { position: absolute; top: 0; bottom: 0; background: #8fd6ff; }
+.grip-value { min-width: 58px; text-align: right; font-size: 12px; color: var(--muted); }
+/* A stalled stream keeps its last reading, which looks exactly like a live
+   measurement. Draining the colour is the signal that it is not one. */
+.grip.stale .grip-fill, .grip.stale .grip-balance { background: #4a545b; }
+.grip.stale .grip-value { color: var(--warning); }
+.tactile-detail > summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 4px 0; }
+.tactile-detail[open] > summary { margin-bottom: 10px; }
+.tactile-sensor { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+.tactile-sensor:first-of-type { border-top: none; }

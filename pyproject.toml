@@ -34,6 +34,10 @@ tactile = [
     "anyskin>=1,<2",
 ]
 dev = [
+    # starlette.testclient needs httpx, which the WebSocket tests use. It is
+    # present locally only as a transitive dependency, so CI installs nothing
+    # without this and the socket tests fail there alone.
+    "httpx>=0.27,<1",
     "pytest>=8,<9",
     "ruff>=0.12,<1",
 ]
@@ -52,7 +56,10 @@ uarm-web = "uarm_xarm6_teleop.cli.web:main"
 uarm_xarm6_teleop = ["web/dist/**/*"]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+# eflesh is a self-contained sensor package at the repository root rather than
+# under src/, so both roots are scanned and filtered to the two real packages.
+where = ["src", "."]
+include = ["uarm_xarm6_teleop*", "eflesh*"]
 
 [tool.ruff]
 line-length = 100

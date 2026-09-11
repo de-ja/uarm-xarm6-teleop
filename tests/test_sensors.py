@@ -1,37 +1,40 @@
+import time
 import unittest
 
+from eflesh import FakeEFleshSource
 from uarm_xarm6_teleop.config import SensorConfig
 from uarm_xarm6_teleop.sensors import (
-    EFleshSensor,
+    EFleshTactileSensor,
     SensorError,
     SensorHub,
     SensorReading,
-    eflesh_labels,
+    build_sensor,
+    build_sensor_hub,
 )
 
 
-class FakeAnySkinProcess:
-    """Stand in for anyskin's reader process without touching hardware."""
+def eflesh_config(**overrides):
+    values = {
+        "kind": "eflesh",
+        "name": "gripper_tactile",
+        # A literal path passes through resolution untouched, so the fixture
+        # needs no attached hardware. Selector resolution is tested separately.
+        "port": "/dev/ttyACM-test",
+        "settle": 5.0,
+    }
+    values.update(overrides)
+    return SensorConfig(**values)
 
-    def __init__(self, num_mags, port, temp_filtered=True):
-        self.num_mags = num_mags
-        self.port = port
-        self.temp_filtered = temp_filtered
-        self.calls = []
-        # anyskin reports [timestamp, *values] with three axes per magnetometer.
-        self.last_reading = [1.5] + [float(i) for i in range(3 * num_mags)]
 
-    def start(self):
-        self.calls.append("start")
+def fake_factory(num_fingers=2, record=None):
+    """Build a source factory that yields hardware-free eFlesh sources."""
 
-    def start_streaming(self):
-        self.calls.append("start_streaming")
+    def factory(port, settle, name):
+        if record is not None:
+            record.append({"port": port, "settle": settle, "name": name})
+        return FakeEFleshSource(num_fingers=num_fingers, name=name)
 
-    def pause_streaming(self):
-        self.calls.append("pause_streaming")
-
-    def join(self):
-        self.calls.append("join")
+    return factory
 
 
 class FakeSensor:
@@ -76,107 +79,152 @@ class FakeSensor:
         self.closed = True
 
 
-def eflesh_config(**overrides):
-    values = {
-        "kind": "eflesh",
-        "name": "gripper_tactile",
-        "port": "/dev/serial/by-id/usb-Adafruit_QT_Py_M0_TEST-if00",
-        "num_mags": 5,
-        "fingers": ("left",),
-    }
-    values.update(overrides)
-    return SensorConfig(**values)
+class EFleshDriverTests(unittest.TestCase):
+    def make(self, num_fingers=2, **overrides):
+        record = []
+        sensor = EFleshTactileSensor(
+            eflesh_config(**overrides), source_factory=fake_factory(num_fingers, record)
+        )
+        return sensor, record
 
-
-class EFleshLabelTests(unittest.TestCase):
-    def test_one_board_labels_follow_physical_position_order(self):
-        labels = eflesh_labels(5, ("left",))
-        self.assertEqual(len(labels), 15)
-        self.assertEqual(labels[0], "left_middle_bx")
-        # Position order is middle, left, right, top, bottom, not address order.
-        self.assertEqual(labels[3], "left_left_bx")
-        self.assertEqual(labels[-1], "left_bottom_bz")
-
-    def test_two_boards_are_ordered_by_mux_channel(self):
-        labels = eflesh_labels(10, ("left", "right"))
-        self.assertEqual(len(labels), 30)
-        self.assertEqual(labels[0], "left_middle_bx")
-        self.assertEqual(labels[15], "right_middle_bx")
-
-    def test_magnetometer_count_must_match_the_finger_names(self):
-        with self.assertRaisesRegex(SensorError, "finger name"):
-            eflesh_labels(10, ("left",))
-
-    def test_partial_board_is_rejected(self):
-        with self.assertRaisesRegex(SensorError, "multiple of 5"):
-            eflesh_labels(7, ("left",))
-
-
-class EFleshSensorTests(unittest.TestCase):
-    def make(self, **overrides):
-        created = []
-
-        def factory(**kwargs):
-            process = FakeAnySkinProcess(**kwargs)
-            created.append(process)
-            return process
-
-        sensor = EFleshSensor(eflesh_config(**overrides), process_factory=factory)
-        return sensor, created
-
-    def test_start_requests_temperature_filtered_streaming(self):
-        sensor, created = self.make()
+    def test_the_finger_count_is_detected_rather_than_configured(self):
+        # The firmware sizes its frame at boot from however many boards came up,
+        # so num_fingers must never be passed through from configuration.
+        sensor, record = self.make()
         sensor.start()
 
-        process = created[0]
-        # Labels describe three field axes per magnetometer, which only holds
-        # when the temperature channel is filtered out.
-        self.assertTrue(process.temp_filtered)
-        self.assertEqual(process.num_mags, 5)
-        self.assertEqual(process.calls, ["start", "start_streaming"])
-
-    def test_reading_splits_the_source_timestamp_from_the_values(self):
-        sensor, created = self.make()
-        sensor.start()
-        reading = sensor.read_latest()
-
-        self.assertEqual(reading.source_timestamp, 1.5)
-        self.assertEqual(len(reading.values), 15)
-        self.assertEqual(reading.labels, sensor.labels)
-        # A local monotonic stamp is what aligns this against camera and leader
-        # samples, so it must not be the sensor's own clock.
-        self.assertNotEqual(reading.timestamp, reading.source_timestamp)
-
-    def test_no_reading_before_the_stream_starts(self):
-        sensor, _created = self.make()
-        self.assertIsNone(sensor.read_latest())
-
-    def test_a_failed_magnetometer_read_is_discarded(self):
-        sensor, created = self.make()
-        sensor.start()
-        # Raw 0xFFFF converts to 78640.8 uT, far beyond the 126.9 mT full scale.
-        created[0].last_reading = [1.5] + [78640.8] * 15
-        self.assertIsNone(sensor.read_latest())
-
-    def test_a_value_count_mismatch_is_reported(self):
-        sensor, created = self.make()
-        sensor.start()
-        created[0].last_reading = [1.5, 0.0, 0.0]
-        with self.assertRaisesRegex(SensorError, "values but"):
-            sensor.read_latest()
-
-    def test_close_stops_streaming_before_joining(self):
-        sensor, created = self.make()
-        sensor.start()
+        self.assertNotIn("num_fingers", record[0])
+        self.assertEqual(sensor.num_fingers, 2)
         sensor.close()
-        self.assertEqual(created[0].calls[-2:], ["pause_streaming", "join"])
+
+    def test_one_finger_is_handled_without_hardcoding_two(self):
+        sensor, _record = self.make(num_fingers=1)
+        sensor.start()
+
+        self.assertEqual(sensor.num_fingers, 1)
+        self.assertEqual(len(sensor.labels), 15)
+        sensor.close()
+
+    def test_the_configured_settle_reaches_the_source(self):
+        sensor, record = self.make(settle=7.5)
+        sensor.start()
+
+        self.assertEqual(record[0]["settle"], 7.5)
+        sensor.close()
+
+    def test_the_port_is_resolved_before_the_source_is_built(self):
+        # A usb: selector is meaningless to the sensor package, so it must be
+        # resolved here. With nothing attached that resolution fails loudly.
+        sensor, _record = self.make(port="usb:serial=NOTATTACHED")
+        with self.assertRaises(Exception) as raised:
+            sensor.start()
+        self.assertIn("NOTATTACHED", str(raised.exception))
+
+    def await_sample(self, sensor, timeout=2.0):
+        """Wait for the reader thread to publish its first sample."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            reading = sensor.read_latest()
+            if reading is not None:
+                return reading
+            time.sleep(0.005)
+        raise AssertionError("the reader published no sample")
+
+    def test_a_reading_is_flattened_with_one_label_per_value(self):
+        sensor, _record = self.make()
+        sensor.start()
+        reading = self.await_sample(sensor)
+
+        self.assertEqual(reading.name, "gripper_tactile")
+        self.assertEqual(len(reading.values), 30)
+        self.assertEqual(len(reading.labels), len(reading.values))
+        self.assertEqual(reading.labels[0], "f0_middle_bx")
+        # A local monotonic stamp aligns this against leader and camera samples,
+        # so it must not be the sensor's own clock.
+        self.assertIsNotNone(reading.source_timestamp)
+        self.assertNotEqual(reading.timestamp, reading.source_timestamp)
+        sensor.close()
+
+    def test_no_reading_and_no_labels_before_starting(self):
+        sensor, _record = self.make()
+        self.assertIsNone(sensor.read_latest())
+        self.assertEqual(sensor.labels, ())
+        self.assertIsNone(sensor.num_fingers)
+
+    def test_geometry_carries_the_hand_verified_constants(self):
+        sensor, _record = self.make()
+        sensor.start()
+        geometry = sensor.geometry_payload()
+
+        # The frontend must read these rather than hold a second copy that drifts.
+        self.assertEqual(geometry["num_fingers"], 2)
+        self.assertEqual(geometry["mags_per_finger"], 5)
+        self.assertEqual(len(geometry["chip_positions_mm"]), 5)
+        self.assertIn("contact_threshold_ut", geometry)
+        self.assertIn("pad_half_mm", geometry)
+        sensor.close()
+
+    def test_geometry_before_starting_is_an_error_not_a_guess(self):
+        sensor, _record = self.make()
+        with self.assertRaisesRegex(SensorError, "has not started"):
+            sensor.geometry_payload()
+
+    def test_display_payloads_are_throttled_and_pad_relative(self):
+        sensor, _record = self.make()
+        sensor.start()
+        frames = []
+        for frame in sensor.display_payloads(hz=200.0, stop=lambda: len(frames) >= 3):
+            frames.append(frame)
+
+        self.assertEqual(len(frames), 3)
+        finger = frames[0]["fingers"][0]
+        # shear_xy arrives already rotated into the shared pad frame, so the
+        # frontend needs no rotation matrices of its own.
+        self.assertEqual(len(finger["shear_xy"]), 5)
+        self.assertEqual(len(finger["shear_xy"][0]), 2)
+        self.assertIn("balance", frames[0])
+        sensor.close()
 
     def test_close_is_idempotent(self):
-        sensor, created = self.make()
+        sensor, _record = self.make()
         sensor.start()
         sensor.close()
         sensor.close()
-        self.assertEqual(created[0].calls.count("join"), 1)
+
+    def test_the_gap_baseline_hook_rejects_use_before_starting(self):
+        sensor, _record = self.make()
+        with self.assertRaisesRegex(SensorError, "has not started"):
+            sensor.set_gap_baseline([[0.0] * 30])
+
+
+class RegistryTests(unittest.TestCase):
+    def test_a_synthetic_kind_is_available_for_the_console(self):
+        # Named distinctly so a generated feed cannot be mistaken for a
+        # measurement in configuration.
+        sensor = build_sensor(eflesh_config(kind="eflesh_fake"))
+        sensor.start()
+        try:
+            deadline = time.monotonic() + 2.0
+            reading = None
+            while reading is None and time.monotonic() < deadline:
+                reading = sensor.read_latest()
+                time.sleep(0.005)
+            self.assertIsNotNone(reading)
+            self.assertEqual(sensor.num_fingers, 2)
+        finally:
+            sensor.close()
+
+    def test_eflesh_is_registered_under_its_kind(self):
+        sensor = build_sensor(eflesh_config())
+        self.assertIsInstance(sensor, EFleshTactileSensor)
+
+    def test_an_unknown_kind_is_rejected(self):
+        with self.assertRaisesRegex(SensorError, "Unsupported sensor kind"):
+            build_sensor(eflesh_config(kind="tacto"))
+
+    def test_a_sensor_that_cannot_be_built_is_skipped_not_fatal(self):
+        hub = build_sensor_hub((eflesh_config(kind="tacto"),))
+        self.assertEqual(hub.names, ())
 
 
 class SensorHubTests(unittest.TestCase):
@@ -232,6 +280,144 @@ class SensorHubTests(unittest.TestCase):
         hub.start()
         self.assertEqual(hub.read_all(), {})
         hub.close()
+
+    def test_an_eflesh_source_flows_through_the_hub(self):
+        sensor = EFleshTactileSensor(eflesh_config(), source_factory=fake_factory())
+        hub = SensorHub((sensor,))
+        hub.start()
+        readings = hub.read_all()
+        hub.close()
+
+        self.assertEqual(set(readings), {"gripper_tactile"})
+        self.assertEqual(len(readings["gripper_tactile"].values), 30)
+
+
+class FullRateReaderTests(unittest.TestCase):
+    """The sensor is read once per sample by one thread, not once per consumer."""
+
+    def make(self):
+        sensor = EFleshTactileSensor(eflesh_config(), source_factory=fake_factory())
+        sensor.start()
+        return sensor
+
+    def test_derived_signals_do_not_depend_on_how_often_a_consumer_reads(self):
+        # Previously both the display and the metrics path advanced the source's
+        # own vibration history, so that signal changed meaning depending on
+        # whether a browser was attached.
+        observed = []
+        for poll_hz in (60.0, 4.0):
+            sensor = self.make()
+            time.sleep(0.35)
+            for _ in range(3):
+                sensor.read_latest()
+                time.sleep(1.0 / poll_hz)
+            reading, _monotonic = sensor._store.latest()
+            observed.append(reading.signals.fingers[0].vibration)
+            sensor.close()
+
+        fast, slow = observed
+        self.assertLess(abs(fast - slow), max(fast, slow) * 0.5 + 0.5)
+
+    def test_every_sample_is_buffered_for_a_recorder(self):
+        sensor = self.make()
+        time.sleep(0.3)
+        drained = sensor.drain()
+        sensor.close()
+
+        # Far more than a per-second snapshot: the reader runs at sensor rate.
+        self.assertGreater(len(drained), 20)
+        timestamp, reading = drained[0]
+        self.assertIsInstance(timestamp, float)
+        self.assertEqual(len(reading.signals.fingers), 2)
+
+    def test_draining_twice_does_not_repeat_samples(self):
+        sensor = self.make()
+        time.sleep(0.2)
+        first = sensor.drain()
+        second = sensor.drain()
+        sensor.close()
+
+        self.assertGreater(len(first), 0)
+        self.assertLess(len(second), len(first))
+
+    def test_the_observed_rate_is_reported(self):
+        sensor = self.make()
+        time.sleep(0.3)
+        rate = sensor.sample_rate_hz
+        sensor.close()
+        self.assertGreater(rate, 20.0)
+
+    def test_sample_age_distinguishes_live_from_frozen(self):
+        sensor = self.make()
+        time.sleep(0.2)
+        self.assertLess(sensor.age_seconds(), 0.5)
+        sensor.close()
+        # Once the reader stops, the newest sample simply ages.
+        frozen = sensor.age_seconds()
+        time.sleep(0.15)
+        self.assertGreater(sensor.age_seconds(), frozen)
+
+    def test_age_is_unknown_before_any_sample(self):
+        sensor = EFleshTactileSensor(eflesh_config(), source_factory=fake_factory())
+        self.assertIsNone(sensor.age_seconds())
+
+    def test_reading_the_snapshot_does_not_consume_the_recorder_buffer(self):
+        sensor = self.make()
+        time.sleep(0.25)
+        for _ in range(5):
+            sensor.read_latest()
+        drained = sensor.drain()
+        sensor.close()
+        self.assertGreater(len(drained), 20)
+
+
+class MultipleSensorTests(unittest.TestCase):
+    """Nothing may assume a particular number of sensors."""
+
+    def configs(self, *names):
+        return tuple(eflesh_config(kind="eflesh_fake", name=name) for name in names)
+
+    def test_two_sensors_are_both_listed_and_addressable(self):
+        hub = build_sensor_hub(self.configs("left_pad", "right_pad"))
+        hub.start()
+        try:
+            self.assertEqual(hub.names, ("left_pad", "right_pad"))
+            self.assertIsNotNone(hub.source("right_pad"))
+        finally:
+            hub.close()
+
+    def test_description_reports_kind_and_view_per_sensor(self):
+        configs = self.configs("left_pad", "right_pad")
+        hub = build_sensor_hub(configs)
+        hub.start()
+        try:
+            described = hub.describe(configs)
+            self.assertEqual([s.name for s in described], ["left_pad", "right_pad"])
+            # The view is what lets a console render a sensor it was not
+            # written against, so it must be declared rather than inferred.
+            self.assertEqual({s.view for s in described}, {"tactile"})
+            self.assertTrue(all(s.started for s in described))
+        finally:
+            hub.close()
+
+    def test_a_sensor_that_failed_is_still_described_as_not_started(self):
+        configs = (eflesh_config(kind="nosuch", name="broken"),)
+        hub = build_sensor_hub(configs)
+        described = hub.describe(configs)
+
+        # It must remain visible in the listing; a console that cannot see it
+        # cannot explain why its panel is empty.
+        self.assertEqual(len(described), 1)
+        self.assertFalse(described[0].started)
+        self.assertIsNone(described[0].view)
+
+    def test_describe_without_configs_falls_back_to_live_sources(self):
+        hub = build_sensor_hub(self.configs("only_pad"))
+        hub.start()
+        try:
+            self.assertEqual([s.name for s in hub.describe()], ["only_pad"])
+        finally:
+            hub.close()
 
 
 if __name__ == "__main__":

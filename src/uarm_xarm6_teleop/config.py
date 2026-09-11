@@ -12,6 +12,9 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "uarm_xa
 # Reported by the controller as joint_speed_limit; commanding beyond it faults.
 XARM6_MAX_JOINT_SPEED_DEGREES = 180.0
 
+# Seconds a tactile sensor must rest before its baseline is captured.
+DEFAULT_SENSOR_SETTLE_SECONDS = 5.0
+
 
 @dataclass(frozen=True)
 class GripperLimits:
@@ -124,8 +127,7 @@ class SensorConfig:
     kind: str
     name: str
     port: str
-    num_mags: int
-    fingers: tuple[str, ...]
+    settle: float
 
 
 @dataclass(frozen=True)
@@ -280,8 +282,16 @@ def validate_config(config: TeleopConfig) -> TeleopConfig:
                 "usb:serial=XXXX, or a /dev/serial/by-id/ path. Run uarm-ports to list "
                 "attached devices and their selectors."
             )
-        if sensor.num_mags <= 0:
-            raise ValueError(f"Sensor '{sensor.name}' needs a positive num_mags")
+        # A baseline captured before the sensor has settled reads several times
+        # noisier than the true floor: measured 9.7-16.5 uT immediately after
+        # handling against 2.4-3.2 uT settled. Nothing downstream can detect
+        # that, so a zero settle is refused rather than trusted.
+        if sensor.settle <= 0:
+            raise ValueError(
+                f"Sensor '{sensor.name}' needs a positive settle. A baseline taken "
+                "before the sensor has settled reads several times noisier than the "
+                f"true floor; {DEFAULT_SENSOR_SETTLE_SECONDS:g} seconds is the default."
+            )
     if physical.gripper_kind not in GRIPPER_LIMITS:
         raise ValueError(
             "physical_xarm.gripper_kind must be one of " + ", ".join(sorted(GRIPPER_LIMITS))
@@ -353,8 +363,7 @@ def load_config(path: str | Path | None = None) -> TeleopConfig:
             kind=str(entry.get("kind", "")),
             name=str(entry.get("name", "")),
             port=str(entry.get("port", "")),
-            num_mags=int(entry.get("num_mags", 0)),
-            fingers=tuple(str(value) for value in entry.get("fingers", ())),
+            settle=float(entry.get("settle", DEFAULT_SENSOR_SETTLE_SECONDS)),
         )
         for entry in _sensor_tables(data)
     )

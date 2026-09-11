@@ -86,9 +86,17 @@ gripper_max_step = 2
 # Criteria combine with AND, and an ambiguous selector is an error rather than a
 # guess. Run uarm-ports to list attached devices and their selectors.
 #
+# The finger count is deliberately not configurable. The firmware sizes its
+# frame at boot from however many boards enumerated, so it is measured from the
+# stream; a host that assumed the wrong width would hang in its resync loop
+# rather than raise.
+#
+# settle is the rest time before the baseline is captured. A baseline taken
+# right after the sensor has been handled reads several times noisier than the
+# true floor, so a zero is refused rather than trusted.
+#
 # [[sensors]]
 # kind = "eflesh"
 # name = "gripper_tactile"
 # port = "usb:serial=XXXXXXXXXXXX"   # run uarm-ports to find this
-# num_mags = 5           # 5 per board; 10 for two boards behind an I2C mux
-# fingers = ["left"]     # one name per board, in ascending mux channel order
+# settle = 5.0
