@@ -27,6 +27,8 @@ deployment guide.
 | `ManiSkillXArm6` | Render and step the visible simulated follower | Physical SDK access |
 | `TeleopController` | Own resources, serialize transitions, run workers, and publish snapshots | HTTP or UI policy |
 | `CameraManager` | Discover cameras and share low-latency capture sessions | Motion decisions |
+| `SensorHub` | Own auxiliary sensors and absorb their failures | Any influence on control |
+| `serial_ports` | Resolve a configured device to a node by USB identity | Opening or reading the device |
 | FastAPI application | Validate requests, supervise browser presence, and serve current state | Direct hardware commands |
 | React application | Present capabilities and request guarded transitions | Authoritative safety state |
 
@@ -178,6 +180,13 @@ The following invariants must remain true during refactoring:
    hardware emergency stop remains authoritative throughout.
 7. Authentication tokens remain outside the repository and owner-readable
    only. Plain `ws://` is used only on a trusted private network.
+8. Auxiliary sensors are observations and never inputs, so invariant 5 does not
+   extend to them: a sensor failure is reported and the sensor dropped, while
+   the run continues. Stopping the arm mid-grasp because a sensor stopped
+   answering would be the worse outcome. See [sensors](sensors.md).
+9. In servo mode (`physical_xarm.mode = 1`) the controller applies no
+   acceleration bound of its own, so `TargetSafety.limit_acceleration` supplies
+   one and configuration cannot request a joint speed the arm will refuse.
 
 ## Public API and documentation policy
 
